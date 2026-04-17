@@ -1,0 +1,39 @@
+Software License Agreement
+Hotel & Event Management System (HEMS)
+1. Introduction
+This Software License Agreement ("Agreement") is a legal agreement between you ("User") and [Your Company/Name] ("Licensor") for the use of the Hotel Management System (HEMS) software ("Software"). By installing, copying, or using the Software, you agree to comply with the terms of this Agreement.
+
+2. License Grant
+Licensor grants the User a non-exclusive, non-transferable, limited license to install and use the Software strictly in accordance with the terms of this Agreement.
+
+3. License Types
+The Software is licensed under one of the following options:
+
+Trial License: Allows limited functionality for evaluation purposes. Expires after [7] days.
+Standard License: Grants full access to the Software for a single user or business entity.
+Enterprise License: Allows multiple users within an organization to use the Software.
+4. License Restrictions
+The User agrees not to:
+
+Modify, reverse engineer, decompile, or disassemble the Software.
+Distribute, sublicense, rent, lease, or transfer the Software to any third party.
+Use the Software for unlawful purposes.
+5. Activation & Validation
+The Software requires a valid license key for activation.
+The license key is unique and linked to the User’s hardware or business.
+Licensor reserves the right to revoke a license if fraudulent use is detected.
+6. Updates & Support
+The license includes [12] months/years of free updates and customer support.
+After the support period, the User may need to purchase an extended support plan.
+7. Termination
+This Agreement is effective until terminated. The License will be revoked if the User violates any terms. Upon termination, the User must uninstall and delete all copies of the Software.
+
+8. Limitation of Liability
+The Software is provided "as is," without any warranties, express or implied. The Licensor is not liable for any damages arising from the use or inability to use the Software.
+
+9. Governing Law
+This Agreement shall be governed by the laws of [Your Country/State]. Any disputes shall be resolved in the courts of [Jurisdiction].
+
+10. Acceptance
+By using this Software, the User acknowledges that they have read, understood, and agreed to the terms of this License Agreement.
+

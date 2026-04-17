@@ -1,0 +1,1293 @@
+Let's start building the hotel management system using FastAPI.
+
+Here's a review of what we've accomplished:
+
+*Hotel Management System*
+
+1. Set up the project structure and installed required libraries.
+2. Designed the database schema using SQLAlchemy.
+3. Implemented CRUD operations for hotels, rooms, reservations, payments, customers, and employees.
+
+*Reservations and Payments*
+
+1. Implemented reservation and payment processing.
+2. Integrated Stripe payment gateway.
+3. Sent email notifications for reservations and payments.
+
+*Reporting System*
+
+1. Implemented reporting system for hotel management.
+2. Generated occupancy, revenue, and customer reports.
+
+*Google Maps Integration*
+
+1. Integrated Google Maps for location-based services.
+2. Retrieved hotel locations and nearby hotels.
+
+*Customer Reviews*
+
+1. Implemented customer review and rating system.
+
+*Room Types*
+
+1. Added support for multiple room types.
+
+*Payment Reminders*
+
+1. Implemented payment reminder system.
+
+*Social Media Integration*
+
+1. Integrated with Facebook, Twitter, and Instagram.
+
+This hotel management system provides a comprehensive platform for managing hotel operations, reservations, payments, customer reviews, and social media presence.
+
+Would you like to:
+
+1. Refine any of these features?
+2. Add new features?
+3. Deploy the application?
+4. Review database schema?
+5. Something else?
+
+*Step 1: Install FastAPI and required libraries*
+
+Run the following command in your terminal:
+```
+bash
+pip install fastapi uvicorn sqlalchemy python-dotenv
+```
+*Step 2: Create a new project directory and files*
+
+Create a new directory for your project and add the following files:
+```
+bash
+hotel_management_system/
+main.py
+models.py
+schemas.py
+database.py
+.env
+requirements.txt
+```
+*Step 3: Define environment variables*
+
+In `.env`, add the following environment variables:
+```
+bash
+DB_HOST=localhost
+DB_USERNAME=root
+DB_PASSWORD=
+DB_NAME=hotel_management
+```
+*Step 4: Define database configuration*
+
+In `database.py`, add the following code:
+```
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+DB_HOST = os.getenv('DB_HOST')
+DB_USERNAME = os.getenv('DB_USERNAME')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_NAME = os.getenv('DB_NAME')
+
+SQLALCHEMY_DATABASE_URL = f'mysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+```
+*Step 5: Define database models*
+
+In `models.py`, add the following code:
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, DateTime
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), unique=True)
+    password = Column(String(255))
+    role = Column(String(50))
+
+class Room(Base):
+    __tablename__ = 'rooms'
+    id = Column(Integer, primary_key=True)
+    room_number = Column(Integer)
+    room_type = Column(String(50))
+    status = Column(String(50))
+
+class Reservation(Base):
+    __tablename__ = 'reservations'
+    id = Column(Integer, primary_key=True)
+    room_id = Column(Integer)
+    guest_name = Column(String(100))
+    arrival_date = Column(DateTime)
+    departure_date = Column(DateTime)
+    status = Column(String(50))
+```
+*Step 6: Define Pydantic schemas*
+
+In `schemas.py`, add the following code:
+```
+from pydantic import BaseModel
+
+class UserSchema(BaseModel):
+    username: str
+    password: str
+    role: str
+
+class RoomSchema(BaseModel):
+    room_number: int
+    room_type: str
+    status: str
+
+class ReservationSchema(BaseModel):
+    room_id: int
+    guest_name: str
+    arrival_date: str
+    departure_date: str
+    status: str
+```
+*Step 7: Create FastAPI app*
+
+In `main.py`, add the following code:
+```
+from fastapi import FastAPI
+from database import engine
+from models import Base
+
+app = FastAPI()
+
+@app.on_event("startup")
+async def startup_event():
+    Base.metadata.create_all(bind=engine)
+```
+Now you have set up the basic structure for your hotel management system using FastAPI.
+
+Would you like to:
+
+1. Create API endpoints for user authentication?
+2. Implement reservation and payment processing?
+3. Add API documentation using OpenAPI?
+4. Discuss API security and authentication strategies?
+5. Something else?
+
+
+Let's create API endpoints for user authentication.
+
+*User Authentication Endpoints*
+
+In `main.py`, add the following code:
+```
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from models import User
+from schemas import UserSchema
+from database import SessionLocal
+
+
+app = FastAPI()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = SessionLocal.query(User).filter(User.username == form_data.username).first()
+    if not user or not user.password == form_data.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"access_token": user.username, "token_type": "bearer"}
+
+@app.get("/users/me")
+async def read_users_me(token: str = Depends(oauth2_scheme)):
+    user = SessionLocal.query(User).filter(User.username == token).first()
+    return user
+
+@app.post("/users/")
+async def create_user(user: UserSchema):
+    new_user = User(username=user.username, password=user.password, role=user.role)
+    SessionLocal.add(new_user)
+    SessionLocal.commit()
+    return {"message": "User created successfully"}
+```
+*User Registration Endpoint*
+
+Create a new endpoint for user registration.
+
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from models import User
+from schemas import UserSchema
+from database import SessionLocal
+
+@app.post("/register/")
+async def register_user(user: UserSchema):
+    existing_user = SessionLocal.query(User).filter(User.username == user.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    new_user = User(username=user.username, password=user.password, role=user.role)
+    SessionLocal.add(new_user)
+    SessionLocal.commit()
+    return {"message": "User registered successfully"}
+```
+*User Login Endpoint*
+
+Create a new endpoint for user login.
+
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from models import User
+from schemas import UserSchema
+from database import SessionLocal
+
+@app.post("/login/")
+async def login_user(user: UserSchema):
+    existing_user = SessionLocal.query(User).filter(User.username == user.username).first()
+    if not existing_user or existing_user.password != user.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"message": "User logged in successfully"}
+```
+Now you have implemented user authentication endpoints.
+
+Would you like to:
+
+1. Implement reservation and payment processing?
+2. Add API documentation using OpenAPI?
+3. Discuss API security and authentication strategies?
+4. Implement role-based access control (RBAC)?
+5. Something else?
+
+
+Let's implement reservation and payment processing.
+
+Reservation Endpoint
+
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from models import Reservation
+from schemas import ReservationSchema
+from database import SessionLocal
+
+@app.post("/reservations/")
+async def create_reservation(reservation: ReservationSchema):
+    new_reservation = Reservation(
+        room_id=reservation.room_id,
+        guest_name=reservation.guest_name,
+        arrival_date=reservation.arrival_date,
+        departure_date=reservation.departure_date,
+        status="booked"
+    )
+    SessionLocal.add(new_reservation)
+    SessionLocal.commit()
+    return {"message": "Reservation created successfully"}
+```
+
+Payment Endpoint
+
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from models import Payment
+from schemas import PaymentSchema
+from database import SessionLocal
+
+@app.post("/payments/")
+async def create_payment(payment: PaymentSchema):
+    new_payment = Payment(
+        reservation_id=payment.reservation_id,
+        payment_method=payment.payment_method,
+        amount=payment.amount,
+        payment_date=payment.payment_date
+    )
+    SessionLocal.add(new_payment)
+    SessionLocal.commit()
+    return {"message": "Payment created successfully"}
+```
+
+Reservation Model
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+
+class Reservation(Base):
+    __tablename__ = 'reservations'
+    id = Column(Integer, primary_key=True)
+    room_id = Column(Integer, ForeignKey('rooms.id'))
+    guest_name = Column(String(100))
+    arrival_date = Column(DateTime)
+    departure_date = Column(DateTime)
+    status = Column(String(50))
+```
+
+Payment Model
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+
+class Payment(Base):
+    __tablename__ = 'payments'
+    id = Column(Integer, primary_key=True)
+    reservation_id = Column(Integer, ForeignKey('reservations.id'))
+    payment_method = Column(String(50))
+    amount = Column(Float)
+    payment_date = Column(DateTime)
+```
+
+Reservation Schema
+
+```
+from pydantic import BaseModel
+
+class ReservationSchema(BaseModel):
+    room_id: int
+    guest_name: str
+    arrival_date: str
+    departure_date: str
+    status: str
+```
+
+Payment Schema
+
+```
+from pydantic import BaseModel
+
+class PaymentSchema(BaseModel):
+    reservation_id: int
+    payment_method: str
+    amount: float
+    payment_date: str
+```
+
+Now you have implemented reservation and payment processing.
+
+Would you like to:
+
+1. Add API documentation using OpenAPI?
+2. Discuss API security and authentication strategies?
+3. Implement role-based access control (RBAC)?
+4. Integrate a payment gateway (e.g., Stripe, PayPal)?
+5. Something else?
+
+
+Let's add API documentation using OpenAPI.
+
+OpenAPI Documentation
+
+FastAPI automatically generates OpenAPI documentation for your API.
+
+To access the documentation, go to:
+
+http://localhost:8000/docs
+
+You can also customize the documentation by adding additional information to your API endpoints.
+
+For example:
+
+```
+from fastapi import FastAPI
+
+app = FastAPI(
+    title="Hotel Management API",
+    description="API for managing hotel reservations and payments",
+    version="1.0.0"
+)
+
+@app.get("/reservations/")
+def read_reservations():
+    """
+    Retrieve a list of all reservations.
+   
+    Returns:
+        list: List of reservations
+    """
+    # implementation
+    pass
+```
+
+This will add a description to the `/reservations/` endpoint in the OpenAPI documentation.
+
+API Security and Authentication Strategies
+
+To secure your API, you can implement authentication and authorization strategies.
+
+FastAPI supports various authentication methods, including:
+
+1. OAuth2
+2. JWT (JSON Web Tokens)
+3. Basic Auth
+
+For example:
+
+```
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    # implementation
+    pass
+
+@app.get("/reservations/")
+async def read_reservations(token: str = Depends(oauth2_scheme)):
+    # implementation
+    pass
+```
+
+This will require a valid token to access the `/reservations/` endpoint.
+
+Role-Based Access Control (RBAC)
+
+To implement RBAC, you can create roles and assign permissions to each role.
+
+For example:
+
+```
+from fastapi import FastAPI, Depends
+from fastapi.security import OAuth2PasswordBearer
+
+app = FastAPI()
+
+roles = {
+    "admin": ["create", "read", "update", "delete"],
+    "staff": ["read", "update"],
+    "guest": ["read"]
+}
+
+def get_role(token: str = Depends(oauth2_scheme)):
+    # implementation
+    pass
+
+@app.get("/reservations/")
+async def read_reservations(role: str = Depends(get_role)):
+    if role != "admin" and role != "staff":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    # implementation
+    pass
+```
+
+This will check the user's role before allowing access to the `/reservations/` endpoint.
+
+Would you like to:
+
+1. Integrate a payment gateway (e.g., Stripe, PayPal)?
+2. Implement email notifications for reservations and payments?
+3. Add support for multiple hotels?
+4. Implement a reporting system for hotel management?
+5. Something else?
+
+Let's integrate a payment gateway.
+
+Payment Gateway Integration
+
+For this example, we'll use Stripe.
+
+Install Stripe:
+
+```
+bash
+pip install stripe
+```
+
+Import Stripe:
+
+```
+import stripe
+```
+
+Set Stripe API keys:
+
+```
+stripe.api_key = "YOUR_STRIPE_SECRET_KEY"
+```
+
+Create Payment Intent:
+
+```
+@app.post("/payments/")
+async def create_payment(payment: PaymentSchema):
+    try:
+        payment_intent = stripe.PaymentIntent.create(
+            amount=payment.amount,
+            currency="usd",
+            payment_method_types=["card"],
+        )
+        return {"client_secret": payment_intent.client_secret}
+    except stripe.error.CardError as e:
+        raise HTTPException(status_code=400, detail="Card error")
+```
+
+Confirm Payment Intent:
+
+```
+@app.post("/payments/confirm/")
+async def confirm_payment(payment_intent_id: str, payment_method_id: str):
+    try:
+        stripe.PaymentIntent.confirm(
+            payment_intent_id,
+            payment_method=payment_method_id,
+        )
+        return {"message": "Payment successful"}
+    except stripe.error.PaymentIntentError as e:
+        raise HTTPException(status_code=400, detail="Payment intent error")
+```
+
+Webhook for Payment Events:
+
+```
+@app.post("/webhooks/stripe/")
+async def stripe_webhook(event: dict):
+    if event["type"] == "payment_intent.succeeded":
+        # Update payment status in database
+        payment_id = event["data"]["object"]["id"]
+        payment = Payment.query.get(payment_id)
+        payment.status = "paid"
+        db.session.commit()
+    return {"message": "Webhook received"}
+```
+
+Stripe Webhook Configuration:
+
+1. Go to Stripe Dashboard > Developers > Webhooks
+2. Add new webhook endpoint (`/webhooks/stripe/`)
+3. Select events (`payment_intent.succeeded`)
+
+Now you have integrated Stripe payment gateway.
+
+Would you like to:
+
+1. Implement email notifications for reservations and payments?
+2. Add support for multiple hotels?
+3. Implement a reporting system for hotel management?
+4. Integrate with Google Maps for location-based services?
+5. Something else?
+
+Note: This is a basic example. You should handle errors, validate user input, and implement additional security measures.
+
+
+Let's implement email notifications for reservations and payments.
+
+Email Notifications
+
+Install required libraries:
+
+```
+bash
+pip install smtplib
+```
+
+Import required libraries:
+
+```
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+```
+
+Email Configuration:
+
+```
+email_config = {
+    "sender_email": "your-email@gmail.com",
+    "sender_password": "your-email-password",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+}
+```
+
+Send Email Function:
+
+```
+def send_email(receiver_email, subject, body):
+    msg = MIMEMultipart()
+    msg["From"] = email_config["sender_email"]
+    msg["To"] = receiver_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+   
+    server = smtplib.SMTP(email_config["smtp_server"], email_config["smtp_port"])
+    server.starttls()
+    server.login(email_config["sender_email"], email_config["sender_password"])
+    text = msg.as_string()
+    server.sendmail(email_config["sender_email"], receiver_email, text)
+    server.quit()
+```
+
+Reservation Email Notification:
+
+```
+@app.post("/reservations/")
+async def create_reservation(reservation: ReservationSchema):
+    # ...
+    send_email(
+        reservation.guest_email,
+        "Reservation Confirmation",
+        f"Dear {reservation.guest_name},\n\nYour reservation has been confirmed.\n\nDetails:\n{reservation}",
+    )
+    return {"message": "Reservation created successfully"}
+```
+
+Payment Email Notification:
+
+```
+@app.post("/payments/")
+async def create_payment(payment: PaymentSchema):
+    # ...
+    send_email(
+        payment.payer_email,
+        "Payment Receipt",
+        f"Dear {payment.payer_name},\n\nYour payment has been processed successfully.\n\nDetails:\n{payment}",
+    )
+    return {"message": "Payment processed successfully"}
+```
+
+Now you have implemented email notifications for reservations and payments.
+
+Would you like to:
+
+1. Add support for multiple hotels?
+2. Implement a reporting system for hotel management?
+3. Integrate with Google Maps for location-based services?
+4. Implement customer reviews and ratings?
+5. Something else?
+
+
+Let's add support for multiple hotels.
+
+Multiple Hotels Support
+
+Hotel Model:
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String
+
+class Hotel(Base):
+    __tablename__ = 'hotels'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+    address = Column(String(200))
+    city = Column(String(50))
+    state = Column(String(50))
+    country = Column(String(50))
+    zip_code = Column(String(10))
+``"
+
+Hotel Schema:
+
+```python
+from pydantic import BaseModel
+
+class HotelSchema(BaseModel):
+    name: str
+    address: str
+    city: str
+    state: str
+    country: str
+    zip_code: str
+``"
+
+Create Hotel Endpoint:
+
+```python
+@app.post("/hotels/")
+async def create_hotel(hotel: HotelSchema):
+    new_hotel = Hotel(
+        name=hotel.name,
+        address=hotel.address,
+        city=hotel.city,
+        state=hotel.state,
+        country=hotel.country,
+        zip_code=hotel.zip_code
+    )
+    db.session.add(new_hotel)
+    db.session.commit()
+    return {"message": "Hotel created successfully"}
+```
+
+Get All Hotels Endpoint:
+
+```
+@app.get("/hotels/")
+async def get_hotels():
+    hotels = db.session.query(Hotel).all()
+    return [{"id": hotel.id, "name": hotel.name} for hotel in hotels]
+```
+
+Update Hotel Endpoint:
+
+```
+@app.put("/hotels/{hotel_id}")
+async def update_hotel(hotel_id: int, hotel: HotelSchema):
+    existing_hotel = db.session.query(Hotel).filter(Hotel.id == hotel_id).first()
+    existing_hotel.name = hotel.name
+    existing_hotel.address = hotel.address
+    existing_hotel.city = hotel.city
+    existing_hotel.state = hotel.state
+    existing_hotel.country = hotel.country
+    existing_hotel.zip_code = hotel.zip_code
+    db.session.commit()
+    return {"message": "Hotel updated successfully"}
+```
+
+Delete Hotel Endpoint:
+
+```
+@app.delete("/hotels/{hotel_id}")
+async def delete_hotel(hotel_id: int):
+    hotel = db.session.query(Hotel).filter(Hotel.id == hotel_id).first()
+    db.session.delete(hotel)
+    db.session.commit()
+    return {"message": "Hotel deleted successfully"}
+```
+
+Now you have added support for multiple hotels.
+
+Would you like to:
+
+1. Implement a reporting system for hotel management?
+2. Integrate with Google Maps for location-based services?
+3. Implement customer reviews and ratings?
+4. Add support for multiple room types?
+5. Something else?
+
+
+Let's implement a reporting system for hotel management.
+
+Reporting System
+
+Reports Model:
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, Date
+
+class Report(Base):
+    __tablename__ = 'reports'
+    id = Column(Integer, primary_key=True)
+    report_type = Column(String(50))
+    report_date = Column(Date)
+    hotel_id = Column(Integer, ForeignKey('hotels.id'))
+    data = Column(String(200))
+```
+
+Reports Schema:
+
+```
+from pydantic import BaseModel
+
+class ReportSchema(BaseModel):
+    report_type: str
+    report_date: str
+    hotel_id: int
+    data: str
+```
+
+Create Report Endpoint:
+
+```
+@app.post("/reports/")
+async def create_report(report: ReportSchema):
+    new_report = Report(
+        report_type=report.report_type,
+        report_date=report.report_date,
+        hotel_id=report.hotel_id,
+        data=report.data
+    )
+    db.session.add(new_report)
+    db.session.commit()
+    return {"message": "Report created successfully"}
+```
+
+Get All Reports Endpoint:
+
+```
+@app.get("/reports/")
+async def get_reports():
+    reports = db.session.query(Report).all()
+    return [{"id": report.id, "report_type": report.report_type} for report in reports]
+```
+
+Types of Reports:
+
+1. Occupancy Report
+2. Revenue Report
+3. Customer Report
+
+Occupancy Report Endpoint:
+
+```
+@app.get("/reports/occupancy/")
+async def occupancy_report(hotel_id: int, start_date: str, end_date: str):
+    occupancy_data = db.session.query(Report).filter(
+        Report.hotel_id == hotel_id,
+        Report.report_type == "occupancy",
+        Report.report_date.between(start_date, end_date)
+    ).all()
+    return [{"date": report.report_date, "occupancy": report.data} for report in occupancy_data]
+```
+
+Revenue Report Endpoint:
+
+```
+@app.get("/reports/revenue/")
+async def revenue_report(hotel_id: int, start_date: str, end_date: str):
+    revenue_data = db.session.query(Report).filter(
+        Report.hotel_id == hotel_id,
+        Report.report_type == "revenue",
+        Report.report_date.between(start_date, end_date)
+    ).all()
+    return [{"date": report.report_date, "revenue": report.data} for report in revenue_data]
+```
+
+Customer Report Endpoint:
+
+```
+@app.get("/reports/customers/")
+async def customer_report(hotel_id: int, start_date: str, end_date: str):
+    customer_data = db.session.query(Report).filter(
+        Report.hotel_id == hotel_id,
+        Report.report_type == "customer",
+        Report.report_date.between(start_date, end_date)
+    ).all()
+    return [{"date": report.report_date, "customers": report.data} for report in customer_data]
+```
+
+Now you have implemented a reporting system for hotel management.
+
+Would you like to:
+
+1. Integrate with Google Maps for location-based services?
+2. Implement customer reviews and ratings?
+3. Add support for multiple room types?
+4. Implement payment reminders?
+5. Something else?
+
+
+Let's integrate with Google Maps for location-based services.
+
+Google Maps Integration
+
+Install required libraries:
+
+```
+bash
+pip install googlemaps
+```
+
+Import required libraries:
+
+```
+import googlemaps
+```
+
+Google Maps API Configuration:
+
+```
+gmaps = googlemaps.Client(key='YOUR_GOOGLE_MAPS_API_KEY')
+```
+
+Get Hotel Location Endpoint:
+
+```
+@app.get("/hotels/{hotel_id}/location")
+async def get_hotel_location(hotel_id: int):
+    hotel = db.session.query(Hotel).filter(Hotel.id == hotel_id).first()
+    location = gmaps.geocode(hotel.address)
+    return {"latitude": location[0]["geometry"]["location"]["lat"],
+            "longitude": location[0]["geometry"]["location"]["lng"]}
+```
+
+Get Nearby Hotels Endpoint:
+
+```
+@app.get("/hotels/nearby")
+async def get_nearby_hotels(latitude: float, longitude: float, radius: int):
+    nearby_hotels = gmaps.places_nearby(location=(latitude, longitude), radius=radius, type='hotel')
+    return nearby_hotels["results"]
+```
+
+Get Directions Endpoint:
+
+```
+@app.get("/directions")
+async def get_directions(origin: str, destination: str):
+    directions = gmaps.directions(origin, destination, mode='driving')
+    return directions[0]["legs"][0]["steps"]
+```
+
+Now you have integrated Google Maps for location-based services.
+
+Would you like to:
+
+1. Implement customer reviews and ratings?
+2. Add support for multiple room types?
+3. Implement payment reminders?
+4. Integrate with social media platforms?
+5. Something else?
+
+Note: Replace 'YOUR_GOOGLE_MAPS_API_KEY' with your actual Google Maps API key. Ensure to enable the Google Maps Places API Web Service and Google Maps JavaScript API in the Google Cloud Console.
+
+
+Let's implement customer reviews and ratings.
+
+Customer Reviews Model:
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, ForeignKey
+
+class Review(Base):
+    __tablename__ = 'reviews'
+    id = Column(Integer, primary_key=True)
+    hotel_id = Column(Integer, ForeignKey('hotels.id'))
+    customer_id = Column(Integer, ForeignKey('customers.id'))
+    rating = Column(Integer)
+    review = Column(String(200))
+```
+
+Customer Reviews Schema:
+
+```
+from pydantic import BaseModel
+
+class ReviewSchema(BaseModel):
+    hotel_id: int
+    customer_id: int
+    rating: int
+    review: str
+```
+
+Create Review Endpoint:
+
+```
+@app.post("/reviews/")
+async def create_review(review: ReviewSchema):
+    new_review = Review(
+        hotel_id=review.hotel_id,
+        customer_id=review.customer_id,
+        rating=review.rating,
+        review=review.review
+    )
+    db.session.add(new_review)
+    db.session.commit()
+    return {"message": "Review created successfully"}
+```
+
+Get Hotel Reviews Endpoint:
+
+```
+@app.get("/hotels/{hotel_id}/reviews")
+async def get_hotel_reviews(hotel_id: int):
+    reviews = db.session.query(Review).filter(Review.hotel_id == hotel_id).all()
+    return [{"id": review.id, "rating": review.rating, "review": review.review} for review in reviews]
+```
+
+Update Review Endpoint:
+
+```
+@app.put("/reviews/{review_id}")
+async def update_review(review_id: int, review: ReviewSchema):
+    existing_review = db.session.query(Review).filter(Review.id == review_id).first()
+    existing_review.rating = review.rating
+    existing_review.review = review.review
+    db.session.commit()
+    return {"message": "Review updated successfully"}
+```
+
+Delete Review Endpoint:
+
+```
+@app.delete("/reviews/{review_id}")
+async def delete_review(review_id: int):
+    review = db.session.query(Review).filter(Review.id == review_id).first()
+    db.session.delete(review)
+    db.session.commit()
+    return {"message": "Review deleted successfully"}
+```
+
+Now you have implemented customer reviews and ratings.
+
+Would you like to:
+
+1. Add support for multiple room types?
+2. Implement payment reminders?
+3. Integrate with social media platforms?
+4. Implement loyalty programs?
+5. Something else?
+
+
+Let's add support for multiple room types.
+
+Room Type Model:
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String
+
+class RoomType(Base):
+    __tablename__ = 'room_types'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50))
+    description = Column(String(200))
+    price = Column(Float)
+```
+
+Room Type Schema:
+
+```
+from pydantic import BaseModel
+
+class RoomTypeSchema(BaseModel):
+    name: str
+    description: str
+    price: float
+```
+
+Create Room Type Endpoint:
+
+```
+@app.post("/room_types/")
+async def create_room_type(room_type: RoomTypeSchema):
+    new_room_type = RoomType(
+        name=room_type.name,
+        description=room_type.description,
+        price=room_type.price
+    )
+    db.session.add(new_room_type)
+    db.session.commit()
+    return {"message": "Room type created successfully"}
+```
+
+Get All Room Types Endpoint:
+
+```
+@app.get("/room_types/")
+async def get_room_types():
+    room_types = db.session.query(RoomType).all()
+    return [{"id": room_type.id, "name": room_type.name} for room_type in room_types]
+```
+
+Update Room Type Endpoint:
+
+```
+@app.put("/room_types/{room_type_id}")
+async def update_room_type(room_type_id: int, room_type: RoomTypeSchema):
+    existing_room_type = db.session.query(RoomType).filter(RoomType.id == room_type_id).first()
+    existing_room_type.name = room_type.name
+    existing_room_type.description = room_type.description
+    existing_room_type.price = room_type.price
+    db.session.commit()
+    return {"message": "Room type updated successfully"}
+```
+
+Delete Room Type Endpoint:
+
+```
+@app.delete("/room_types/{room_type_id}")
+async def delete_room_type(room_type_id: int):
+    room_type = db.session.query(RoomType).filter(RoomType.id == room_type_id).first()
+    db.session.delete(room_type)
+    db.session.commit()
+    return {"message": "Room type deleted successfully"}
+```
+
+Associate Room Type with Room:
+
+```
+class Room(Base):
+    __tablename__ = 'rooms'
+    id = Column(Integer, primary_key=True)
+    room_number = Column(Integer)
+    room_type_id = Column(Integer, ForeignKey('room_types.id'))
+    hotel_id = Column(Integer, ForeignKey('hotels.id'))
+```
+
+Now you have added support for multiple room types.
+
+Would you like to:
+
+1. Implement payment reminders?
+2. Integrate with social media platforms?
+3. Implement loyalty programs?
+4. Add support for multiple hotels?
+5. Something else?
+
+
+Let's implement payment reminders.
+
+Payment Reminder Model:
+
+```
+from database import Base
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+
+class PaymentReminder(Base):
+    __tablename__ = 'payment_reminders'
+    id = Column(Integer, primary_key=True)
+    payment_id = Column(Integer, ForeignKey('payments.id'))
+    reminder_date = Column(DateTime)
+    reminder_sent = Column(Boolean, default=False)
+``'
+
+Payment Reminder Schema:
+
+```python
+from pydantic import BaseModel
+
+class PaymentReminderSchema(BaseModel):
+    payment_id: int
+    reminder_date: str
+    reminder_sent: bool
+``'
+
+Create Payment Reminder Endpoint:
+
+```python
+@app.post("/payment_reminders/")
+async def create_payment_reminder(payment_reminder: PaymentReminderSchema):
+    new_payment_reminder = PaymentReminder(
+        payment_id=payment_reminder.payment_id,
+        reminder_date=payment_reminder.reminder_date
+    )
+    db.session.add(new_payment_reminder)
+    db.session.commit()
+    return {"message": "Payment reminder created successfully"}
+```
+
+Send Payment Reminder:
+
+```
+import schedule
+import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+def send_payment_reminder(payment_reminder):
+    msg = MIMEMultipart()
+    msg["From"] = "your-email@gmail.com"
+    msg["To"] = "customer-email@gmail.com"
+    msg["Subject"] = "Payment Reminder"
+    body = "Dear Customer,\n\nYour payment is due on {}.\n\nBest regards,\nHotel Management".format(payment_reminder.reminder_date)
+    msg.attach(MIMEText(body, "plain"))
+   
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(msg["From"], "your-email-password")
+    text = msg.as_string()
+    server.sendmail(msg["From"], msg["To"], text)
+    server.quit()
+
+def job():
+    payment_reminders = db.session.query(PaymentReminder).filter(PaymentReminder.reminder_sent == False).all()
+    for payment_reminder in payment_reminders:
+        if payment_reminder.reminder_date <= datetime.now():
+            send_payment_reminder(payment_reminder)
+            payment_reminder.reminder_sent = True
+            db.session.commit()
+
+schedule.every(1).day.at("08:00").do(job)  # Run job daily at 8am
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+```
+
+Now you have implemented payment reminders.
+
+Would you like to:
+
+1. Integrate with social media platforms?
+2. Implement loyalty programs?
+3. Add support for multiple hotels?
+4. Implement customer segmentation?
+5. Something else?
+
+Let's integrate with social media platforms.
+
+Social Media Integration
+
+Install required libraries:
+
+```
+bash
+pip install requests
+```
+
+Import required libraries:
+
+```
+import requests
+```
+
+Facebook Integration:
+
+```
+@app.post("/facebook/share")
+async def share_on_facebook(post_id: int, access_token: str):
+    url = f"https://graph.facebook.com/v13.0/me/feed"
+    params = {
+        "access_token": access_token,
+        "link": f"https://your-hotel-website.com/post/{post_id}",
+        "message": "Check out our latest offer!"
+    }
+    response = requests.post(url, params=params)
+    return response.json()
+```
+
+Twitter Integration:
+
+```
+@app.post("/twitter/tweet")
+async def tweet(post_id: int, api_key: str, api_secret: str, access_token: str, access_token_secret: str):
+    url = "https://api.twitter.com/1.1/statuses/update.json"
+    params = {
+        "status": f"Check out our latest offer! https://your-hotel-website.com/post/{post_id}",
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "access_token": access_token,
+        "access_token_secret": access_token_secret
+    }
+    response = requests.post(url, params=params)
+    return response.json()
+```
+
+Instagram Integration:
+
+```
+@app.post("/instagram/share")
+async def share_on_instagram(post_id: int, access_token: str):
+    url = f"https://graph.instagram.com/v13.0/me/media"
+    params = {
+        "access_token": access_token,
+        "image_url": f"https://your-hotel-website.com/post/{post_id}/image",
+        "caption": "Check out our latest offer!"
+    }
+    response = requests.post(url, params=params)
+    return response.json()
+```
+
+Now you have integrated your hotel management system with social media platforms.
+
+Would you like to:
+
+1. Implement loyalty programs?
+2. Add support for multiple hotels?
+3. Implement customer segmentation?
+4. Integrate with online travel agencies (OTAs)?
+5. Something else?

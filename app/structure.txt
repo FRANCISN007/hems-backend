@@ -1,0 +1,263 @@
+HEMS-project/
+│
+├── app/                      # Backend (FastAPI application)
+│   ├── __init__.py
+│   ├── main.py
+│   ├── database.py
+│   ├── users/
+│   │   ├── __init__.py
+│   │   ├── router.py
+│   │   ├── auth.py
+│   │   ├── models.py
+│   │   ├── schemas.py
+│   ├── rooms/
+│   │   ├── __init__.py
+│   │   ├── router.py
+│   │   ├── models.py
+│   │   ├── schemas.py
+│   ├── bookings/
+│   │   ├── __init__.py
+│   │   ├── router.py
+│   │   ├── models.py
+│   │   ├── schemas.py
+│   ├── payments/
+│   │   ├── __init__.py
+│   │   ├── router.py
+│   │   ├── models.py
+│   │   ├── schemas.py
+        
+|
+|
+|----start.py
+│
+├── frontend/                 # New directory for the Tkinter GUI
+│   ├── __init__.py 
+|   |-- login_gui.py
+|   |--dashboard.py              
+│   ├── main.py               # Main entry point for the Tkinter GUI
+│   ├── users_gui.py          # GUI logic for the Users module
+│   ├── rooms_gui.py          # GUI logic for the Rooms module
+│   ├── bookings_gui.py       # GUI logic for the Bookings module
+│   ├── payments_gui.py       # GUI logic for the Payments module
+│   ├── utils.py
+|   |--license_gui.py   
+|   |--event_gui.py           # Common helper functions (e.g., API requests)
+│
+├── env/                      # Python virtual environment
+│
+├── .gitignore
+├── requirements.txt          # Python dependencies
+├── README.md
+
+ pip install -r requirements.txt
+ pip freeze > requirements.txt
+
+%USERPROFILE%\AppData\Local\programs
+[System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Program Files\Git\bin", [System.EnvironmentVariableTarget]::Machine)
+
+$env:Path += ";C:\Program Files\Git\bin;C:\Program Files\Git\cmd"
+after the above, then shut down
+powershell
+
+Get-NetIPAddress | Select-Object InterfaceAlias,IPAddress
+
+ipconfig.exe
+
+to use the remote desktop  
+sysdm.cpl
+
+
+Press Win + R, type mstsc, and hit Enter.
+2️⃣ In the Remote Desktop Connection, enter the server’s IP address (e.g., 192.168.1.200).
+3️⃣ Click Connect, enter login details, and access the system.
+
+using winpython, installing requirements.txt
+C:\Users\KLOUNGE\Desktop\WinPython\WPy64-310111\python-3.10.11.amd64\python.exe -m pip install -r C:\Users\KLOUNGE\Documents\HEMS-main\requirements.txt
+
+
+
+📂 Updated Backend Structure
+bash
+Copy
+Edit
+HOTEL MGMT SYS/
+│
+├── app/                    
+│   ├── __init__.py
+│   ├── main.py
+│   ├── database.py
+│   ├── users/                
+│   ├── rooms/                
+│   ├── bookings/             
+│   ├── payments/             
+│   ├── license/              # 🔹 New module for license key verification
+│   │   ├── __init__.py
+│   │   ├── router.py         # API endpoints for license validation
+│   │   ├── models.py         # Database model for license keys
+│   │   ├── schemas.py        # Pydantic schemas for API requests
+│   │   ├── services.py       # Logic for license validation & expiration
+│
+├── env/                    
+│
+├── .gitignore
+├── requirements.txt        
+├── README.md  
+📌 Explanation (Backend)
+license/models.py → Defines license key database model.
+license/schemas.py → Defines request/response validation for API.
+license/router.py → API endpoints for validating the license key.
+license/services.py → Contains logic to generate, validate, and expire licenses.
+Frontend (Tkinter) - License Validation
+Since the frontend (Tkinter) will request the license key, create a license_gui.py file in frontend/.
+
+📂 Updated Frontend Structure
+bash
+Copy
+Edit
+HOTEL MGMT SYS/
+│
+├── frontend/              
+│   ├── __init__.py       
+│   ├── main.py           
+│   ├── users_gui.py      
+│   ├── rooms_gui.py      
+│   ├── bookings_gui.py   
+│   ├── payments_gui.py   
+│   ├── license_gui.py    # 🔹 New file for the license verification window
+│   ├── utils.py          
+│
+├── env/                 
+│
+├── .gitignore
+├── requirements.txt     
+├── README.md  
+📌 Explanation (Frontend)
+license_gui.py → Handles the license entry window in Tkinter.
+utils.py → Handles API calls to the backend.
+
+
+to stop uvicorn that is used by another process
+taskkill /PID 9268 /F
+
+to check 
+netstat -ano | findstr :8000
+
+
+
+docker build -t hotel-management-system .
+docker run -p 8000:8000 hotel-management-system
+
+
+
+
+
+
+Run the following command to create a new React app:
+npx create-react-app hotel-management-frontend
+
+Navigate to your project folder:
+cd hotel-management-frontend
+
+Install required dependencies (e.g., Axios for API requests):
+npm install axios
+
+
+
+
+1. check out endpoint does not actually require the guest name because all the entry are done that day
+2. the check out list and reservation list should be "check in History and Reservation History
+
+
+@router.get("/", response_model=list[dict])
+def list_rooms(db: Session = Depends(get_db)):
+    # Query all rooms from the Room table
+    all_rooms = db.query(room_models.Room).all()
+    
+    # Query all reservations
+    reservations = db.query(reservation_models.Reservation).all()
+    
+    # Query all check-ins
+    check_ins = db.query(check_in_models.Check_in).all()
+
+    # Prepare the combined result
+    result = []
+
+    # Add all rooms with their current status
+    for room in all_rooms:
+        result.append({
+            "room_number": room.room_number,
+            "room_type": room.room_type,
+            "amount": room.amount,
+            "status": room.status,
+        })
+
+    # Add all reservations with arrival and departure dates
+    for reservation in reservations:
+        result.append({
+            "room_number": reservation.room_number,
+            "status": "reserved",
+            "arrival_date": reservation.arrival_date,
+            "departure_date": reservation.departure_date,
+        })
+
+    # Add all check-ins with arrival and departure dates
+    for check_in in check_ins:
+        result.append({
+            "room_number": check_in.room_number,
+            "status": "checked-in",
+            "arrival_date": check_in.arrival_date,
+            "departure_date": check_in.departure_date,
+        })
+
+    return result
+
+
+
+
+@router.get("/available")
+def list_available_rooms(db: Session = Depends(get_db)):
+    available_rooms = db.query(models.Room).filter(models.Room.status == "available").all()
+    total_available_rooms = len(available_rooms)
+
+    if total_available_rooms == 0:
+        return {
+            "message": "We are fully booked!",
+            "total_available_rooms": 0,
+            "available_rooms": []
+        }
+
+    return {
+        "total_available_rooms": total_available_rooms,
+        "available_rooms": available_rooms
+    }
+
+
+import logo from './logo.svg';
+import './App.css';
+
+function App() {
+  return (
+    <div className="App">
+      <header className="App-header">
+        <img src={logo} className="App-logo" alt="logo" />
+        <p>
+          Edit <code>src/App.js</code> and save to reload.
+        </p>
+        <a
+          className="App-link"
+          href="https://reactjs.org"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Learn React
+        </a>
+      </header>
+    </div>
+  );
+}
+
+export default App;
+
+
+
+(`${API_BASE_URL}

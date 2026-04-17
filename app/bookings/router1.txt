@@ -1,0 +1,974 @@
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi import Query
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from datetime import date
+from app.database import get_db
+from typing import Optional  # Import for optional parameters
+from app.users.auth import get_current_user
+from sqlalchemy import or_
+from sqlalchemy import and_
+from app.rooms import models as room_models  # Import room models
+from app.bookings import schemas, models as  booking_models
+from app.payments import models as payment_models
+from loguru import logger
+from datetime import datetime
+import os
+import shutil
+from fastapi import UploadFile, File, Form
+from typing import Optional, Union
+
+router = APIRouter()
+
+# Set up logging
+logger.add("app.log", rotation="500 MB", level="DEBUG")
+
+
+#log_path = os.path.join(os.getenv("LOCALAPPDATA", "C:\\Temp"), "app.log")
+#logger.add(log_path, rotation="500 MB", level="DEBUG")
+
+@router.post("/create/")
+def create_booking(
+    room_number: str = Form(...),
+    guest_name: str = Form(...),
+    gender: str = Form(...),
+    mode_of_identification: str =Form(...),
+    identification_number: Optional[str] = Form(None),
+    address: str = Form(...),
+    arrival_date: date = Form(...),
+    departure_date: date = Form(...),
+    booking_type: str = Form(...),
+    phone_number: str = Form(...),
+    #attachment: Optional[UploadFile] = File(None),
+    vehicle_no: Optional[str] = Form(None),
+    attachment: Optional[Union[UploadFile, str]] = File(None),
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    today = date.today()
+
+    # ✅ Normalize empty string input from Swagger to None
+    if isinstance(attachment, str) and attachment == "":
+        attachment = None
+
+    # Later in the code...
+    attachment_path = None
+    if isinstance(attachment, UploadFile):
+        upload_dir = "uploads/"
+        os.makedirs(upload_dir, exist_ok=True)
+        attachment_path = os.path.join(upload_dir, attachment.filename)
+        with open(attachment_path, "wb") as buffer:
+            shutil.copyfileobj(attachment.file, buffer)
+
+    # Validate dates
+    if departure_date <= arrival_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Departure date must be later than the arrival date.",
+        )
+
+    if booking_type == "checked-in" and arrival_date != today:
+        raise HTTPException(
+            status_code=400,
+            detail="Checked-in bookings can only be created for today's date.",
+        )
+
+    if booking_type == "reservation" and arrival_date <= today:
+        raise HTTPException(
+            status_code=400,
+            detail="Reservation bookings must be scheduled for a future date.",
+        )
+
+    if booking_type == "complimentary" and arrival_date != today:
+        raise HTTPException(
+            status_code=400,
+            detail="Complimentary bookings can only be made for today's date.",
+        )
+
+    normalized_room_number = room_number.strip().lower()
+
+    room = (
+        db.query(room_models.Room)
+        .filter(func.lower(room_models.Room.room_number) == normalized_room_number)
+        .first()
+    )
+    if not room:
+        raise HTTPException(status_code=404, detail=f"Room {room_number} not found.")
+
+    overlapping_booking = (
+        db.query(booking_models.Booking)
+        .filter(
+            func.lower(booking_models.Booking.room_number) == normalized_room_number,
+            booking_models.Booking.status.notin_(["checked-out", "cancelled"]),
+            and_(
+                booking_models.Booking.arrival_date < departure_date,
+                booking_models.Booking.departure_date > arrival_date,
+            ),
+        )
+        .first()
+    )
+
+    if overlapping_booking:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Room {room_number} is already booked for the requested dates. "
+                   f"Check Booking ID: {overlapping_booking.id}",
+        )
+
+    number_of_days = (departure_date - arrival_date).days
+
+    if booking_type == "complimentary":
+        booking_cost = 0
+        payment_status = "complimentary"
+        booking_status = "checked-in"
+    else:
+        booking_cost = room.amount * number_of_days
+        payment_status = "pending"
+        booking_status = "reserved" if booking_type == "reservation" else "checked-in"
+
+    # Handle attachment
+    attachment_path = None
+    if attachment and attachment.filename:  # ✅ Check filename is non-empty
+        upload_dir = "uploads/"
+        os.makedirs(upload_dir, exist_ok=True)
+        attachment_path = os.path.join(upload_dir, attachment.filename)
+        with open(attachment_path, "wb") as buffer:
+            shutil.copyfileobj(attachment.file, buffer)
+
+
+    try:
+        new_booking = booking_models.Booking(
+            room_number=room.room_number,
+            guest_name=guest_name,
+            gender=gender,
+            mode_of_identification=mode_of_identification,
+            identification_number=identification_number,
+            address=address,
+            arrival_date=arrival_date,
+            departure_date=departure_date,
+            booking_type=booking_type,
+            phone_number=phone_number,
+            number_of_days=number_of_days,
+            status=booking_status,
+            room_price=room.amount if booking_type != "complimentary" else 0,
+            booking_cost=booking_cost,
+            payment_status=payment_status,
+            created_by=current_user.username,
+            vehicle_no=vehicle_no,
+            attachment=attachment_path,
+        )
+
+        db.add(new_booking)
+        room.status = booking_status
+        db.commit()
+        db.refresh(new_booking)
+
+        return {
+            "message": f"Booking created successfully for room {room.room_number}.",
+            "booking_details": {
+                "id": new_booking.id,
+                "room_number": new_booking.room_number,
+                "guest_name": new_booking.guest_name,
+                "gender": new_booking.gender,
+                "address": new_booking.address,
+                "mode_of_identification": new_booking.mode_of_identification,
+                "identification_number": new_booking.identification_number,
+                "room_price": new_booking.room_price,
+                "arrival_date": new_booking.arrival_date,
+                "departure_date": new_booking.departure_date,
+                "booking_type": new_booking.booking_type,
+                "phone_number": new_booking.phone_number,
+                "booking_date": new_booking.booking_date.isoformat(),
+                "number_of_days": new_booking.number_of_days,
+                "status": new_booking.status,
+                "booking_cost": new_booking.booking_cost,
+                "payment_status": new_booking.payment_status,
+                "created_by": new_booking.created_by,
+                "vehicle_no": new_booking.vehicle_no,
+                "attachment": new_booking.attachment,
+            },
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+   
+    
+
+@router.get("/list")
+def list_bookings(
+    start_date: Optional[date] = Query(None, description="date format-yyyy-mm-dd"),
+    end_date: Optional[date] = Query(None, description="date format-yyyy-mm-dd"),
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    try:
+        # Ensure that the start_date is not greater than end_date
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Start date cannot be later than end date, check your date entry"
+            )
+
+        # Set the start and end dates to the beginning and end of the day, if provided
+        start_datetime = datetime.combine(start_date, datetime.min.time()) if start_date else None
+        end_datetime = datetime.combine(end_date, datetime.max.time()) if end_date else None
+
+        # Build the base query for bookings
+        query = db.query(booking_models.Booking).filter(
+            booking_models.Booking.status != "cancel"  # Exclude cancelled bookings
+        )
+
+        if start_datetime:
+            query = query.filter(booking_models.Booking.booking_date >= start_datetime)
+        if end_datetime:
+            query = query.filter(booking_models.Booking.booking_date <= end_datetime)
+
+        # Retrieve the bookings sorted by booking_date in descending order
+        bookings = query.order_by(booking_models.Booking.booking_date.desc()).all()
+        
+        # Filter only checked-in bookings for total cost calculation
+        #checked_in_bookings = [booking for booking in bookings if booking.status == "checked-in"]
+        checked_in_bookings = [
+            booking for booking in bookings if booking.status in ["checked-in", "checked-out", "reserved"]
+        ]
+
+        # Calculate total booking cost (excluding cancelled bookings)
+        total_booking_cost = sum(booking.booking_cost for booking in checked_in_bookings)
+
+        # Format bookings for response
+        formatted_bookings = [
+            {
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "gender": booking.gender,
+                "arrival_date": booking.arrival_date,
+                "departure_date": booking.departure_date,
+                "number_of_days": booking.number_of_days,
+                "booking_type": booking.booking_type,
+                "phone_number": booking.phone_number,
+                "booking_date": booking.booking_date,
+                "status": booking.status,
+                "payment_status": booking.payment_status,
+                "mode_of_identification": booking.mode_of_identification,
+                "identification_number": booking.identification_number,
+                "address": booking.address,
+                "booking_cost": booking.booking_cost,
+                "created_by": booking.created_by,
+                "vehicle_no": booking.vehicle_no,
+                "attachment": booking.attachment
+            }
+            for booking in bookings
+        ]
+
+        return {
+            "total_bookings": len(formatted_bookings),
+            "total_booking_cost": total_booking_cost,  # Excluding canceled bookings
+            "bookings": formatted_bookings,
+        }
+
+    except Exception as e:
+        logger.error(f"Error retrieving bookings by date: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f" {str(e)}",
+        )
+
+
+
+@router.get("/status")
+def list_bookings_by_status(
+    status: Optional[str] = Query(None, description="Booking status to filter by (checked-in, reserved, checked-out, cancelled, complimentary)"),
+    start_date: Optional[date] = Query(None, description="Filter by booking date (start) in format yyyy-mm-dd"),
+    end_date: Optional[date] = Query(None, description="Filter by booking date (end) in format yyyy-mm-dd"),
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    try:
+        # Build the base query
+        query = db.query(booking_models.Booking)
+
+        # Special condition: If searching for "complimentary", filter by payment_status
+        if status:
+            if status.lower() == "complimentary":
+                query = query.filter(booking_models.Booking.payment_status == "complimentary")
+            else:
+                query = query.filter(booking_models.Booking.status == status)
+
+        # Apply date filters based on booking_date
+        if start_date:
+            query = query.filter(booking_models.Booking.booking_date >= datetime.combine(start_date, datetime.min.time()))
+        if end_date:
+            query = query.filter(booking_models.Booking.booking_date <= datetime.combine(end_date, datetime.max.time()))
+
+
+        # Execute the query and get the results
+        bookings = query.all()
+
+        # If no bookings are found, return a message with no bookings found
+        if not bookings:
+            return {"message": "No bookings found for the given criteria."}
+
+        # Format the bookings to include necessary details
+        formatted_bookings = [
+            {
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "gender": booking.gender,
+                "arrival_date": booking.arrival_date,
+                "departure_date": booking.departure_date,
+                "number_of_days": booking.number_of_days,
+                "phone_number": booking.phone_number,
+                "booking_date": booking.booking_date,  # Booking Date as the filter
+                "status": booking.status,
+                "booking_type": booking.booking_type,
+                "payment_status": booking.payment_status,  # Includes payment status
+                "mode_of_identification": booking.mode_of_identification,
+                "identification_number": booking.identification_number,
+                "address": booking.address,
+                "booking_cost": booking.booking_cost,
+                "created_by": booking.created_by,
+                "vehicle_no": booking.vehicle_no,
+                #"attachment": booking.attachment
+            }
+            for booking in bookings
+        ]
+
+        # Return the formatted response
+        return {
+            "total_bookings": len(formatted_bookings),
+            "bookings": formatted_bookings if formatted_bookings else []  # Ensure bookings is always a list
+        }
+
+    except Exception as e:
+        logger.error(f"Error retrieving bookings by status and booking date: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred: {str(e)}",
+        )
+
+
+
+
+@router.get("/search")
+def search_guest_name(
+    guest_name: str,
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    """
+    Search for bookings by guest name.
+    Returns all bookings matching the given guest name.
+    """
+    try:
+        bookings = db.query(booking_models.Booking).filter(
+            booking_models.Booking.guest_name.ilike(f"%{guest_name}%"),
+            
+        ).all()
+
+
+        if not bookings:
+            raise HTTPException(status_code=404, detail=f"No bookings found for guest '{guest_name}'.")
+
+        formatted_bookings = []
+        for booking in bookings:
+            formatted_bookings.append({
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "gender": booking.gender,
+                "arrival_date": booking.arrival_date,
+                "departure_date": booking.departure_date,
+                "number_of_days": booking.number_of_days,
+                "booking_type": booking.booking_type,
+                "phone_number": booking.phone_number,
+                "booking_date":booking.booking_date,
+                "status": booking.status,
+                "payment_status": booking.payment_status,
+                "mode_of_identification": booking.mode_of_identification,
+                "identification_number": booking.identification_number,
+                "address": booking.address,
+                "booking_cost":booking.booking_cost,
+                "created_by": booking.created_by,
+                "vehicle_no": booking.vehicle_no,
+                #"attachment": booking.attachment
+            })
+
+        return {
+            "total_bookings": len(formatted_bookings),
+            "bookings": formatted_bookings,
+        }
+
+    except Exception as e:
+        logger.error(f"Error searching bookings for guest '{guest_name}': {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f" {str(e)}",
+        )
+
+
+
+@router.get("/{booking_id}")
+def list_booking_by_id(
+    booking_id: int,
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    
+    # Fetch the booking by ID
+    booking = db.query(booking_models.Booking).filter(
+        booking_models.Booking.id == booking_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(status_code=404, detail=f"Booking with ID {booking_id} not found.")
+
+    # Format the response
+    formatted_booking = {
+        "id": booking.id,
+        "room_number": booking.room_number,
+        "guest_name": booking.guest_name,
+        "gender": booking.gender,
+        "arrival_date": booking.arrival_date,
+        "departure_date": booking.departure_date,
+        "number_of_days": booking.number_of_days,
+        "booking_type": booking.booking_type,
+        "phone_number": booking.phone_number,
+        "booking_date": booking.booking_date,
+        "status": booking.status,
+        "payment_status": booking.payment_status,
+        "mode_of_identification": booking.mode_of_identification,
+        "identification_number": booking.identification_number,
+        "address": booking.address,
+        "booking_cost": booking.booking_cost,
+        "created_by": booking.created_by,
+        "vehicle_no": booking.vehicle_no,
+        #"attachment": booking.attachment
+    }
+
+    return {"message": f"Booking details for ID {booking_id} retrieved successfully.", "booking": formatted_booking}
+
+
+
+
+@router.get("/room/{room_number}")
+def list_bookings_by_room(
+    room_number: str,
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    """
+    List all bookings associated with a specific room number within an optional date range.
+    The query ensures that any booking **active** within the specified dates is retrieved.
+    """
+    try:
+        # Normalize room_number to lowercase
+        normalized_room_number = room_number.lower()
+
+        # Check if the room exists in the database (case-insensitive)
+        room_exists = db.query(room_models.Room).filter(
+            func.lower(room_models.Room.room_number) == normalized_room_number
+        ).first()
+
+        if not room_exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Room number {room_number} does not exist.",
+            )
+
+        # Build the base query for bookings (case-insensitive)
+        bookings_query = db.query(booking_models.Booking).filter(
+            func.lower(booking_models.Booking.room_number) == normalized_room_number
+        )
+
+        # Apply date range filter: Check if the booking **overlaps** with the given date range
+        if start_date and end_date:
+            bookings_query = bookings_query.filter(
+                and_(
+                    booking_models.Booking.arrival_date <= end_date,  # Booking starts before or on end_date
+                    booking_models.Booking.departure_date >= start_date  # Booking ends after or on start_date
+                )
+            )
+
+        # Fetch bookings
+        bookings = bookings_query.all()
+
+        if not bookings:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No bookings found for room number {room_number} within the selected date range.",
+            )
+
+        # Format the bookings for response
+        formatted_bookings = [
+            {
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "gender": booking.gender,
+                "arrival_date": booking.arrival_date,
+                "departure_date": booking.departure_date,
+                "number_of_days": booking.number_of_days,
+                "booking_type": booking.booking_type,
+                "phone_number": booking.phone_number,
+                "booking_date": booking.booking_date,
+                "status": booking.status,
+                "payment_status": booking.payment_status,
+                "mode_of_identification": booking.mode_of_identification,
+                "identification_number": booking.identification_number,
+                "address": booking.address,
+                "booking_cost": booking.booking_cost,
+                "created_by": booking.created_by,
+                "vehicle_no": booking.vehicle_no,
+                #"attachment": booking.attachment
+            }
+            for booking in bookings
+        ]
+
+        return {
+            "room_number": normalized_room_number,
+            "total_bookings": len(formatted_bookings),
+            "bookings": formatted_bookings,
+        }
+
+    except Exception as e:
+        logger.error(f"Error retrieving bookings for room {room_number}: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{str(e)}"
+        )
+
+
+
+@router.put("/update/")
+def update_booking(
+    booking_id: int = Form(...),
+    room_number: str = Form(...),
+    guest_name: str = Form(...),
+    gender: str = Form(...),
+    mode_of_identification: str = Form(...),
+    identification_number: Optional[str] = Form(None),
+    address: str = Form(...),
+    arrival_date: date = Form(...),
+    departure_date: date = Form(...),
+    booking_type: str = Form(...),
+    phone_number: str = Form(...),
+    vehicle_no: Optional[str] = Form(None),
+    attachment: Optional[Union[UploadFile, str]] = File(None),
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+    try:
+        today = date.today()
+
+        if isinstance(attachment, str) and attachment == "":
+            attachment = None
+
+        booking = db.query(booking_models.Booking).filter(booking_models.Booking.id == booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail=f"Booking with ID {booking_id} not found.")
+
+        # Validate date logic
+        if departure_date <= arrival_date:
+            raise HTTPException(status_code=400, detail="Departure date must be after arrival date.")
+        if booking_type == "checked-in" and arrival_date != today:
+            raise HTTPException(status_code=400, detail="Checked-in bookings must be for today.")
+        if booking_type == "reservation" and arrival_date <= today:
+            raise HTTPException(status_code=400, detail="Reservations must be for a future date.")
+        if booking_type == "complimentary" and arrival_date != today:
+            raise HTTPException(status_code=400, detail="Complimentary bookings are only allowed for today.")
+
+        normalized_room_number = room_number.strip().lower()
+        room = (
+            db.query(room_models.Room)
+            .filter(func.lower(room_models.Room.room_number) == normalized_room_number)
+            .first()
+        )
+        if not room:
+            raise HTTPException(status_code=404, detail=f"Room {room_number} not found.")
+
+        overlapping_booking = (
+            db.query(booking_models.Booking)
+            .filter(
+                func.lower(booking_models.Booking.room_number) == normalized_room_number,
+                booking_models.Booking.id != booking_id,
+                booking_models.Booking.status.notin_(["checked-out", "cancelled"]),
+                and_(
+                    booking_models.Booking.arrival_date < departure_date,
+                    booking_models.Booking.departure_date > arrival_date,
+                ),
+            )
+            .first()
+        )
+        if overlapping_booking:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Room {room_number} is already booked for the requested dates. "
+                       f"Check Booking ID: {overlapping_booking.id}",
+            )
+
+        number_of_days = (departure_date - arrival_date).days
+        if number_of_days <= 0:
+            raise HTTPException(status_code=400, detail="Number of days must be greater than zero.")
+
+        if booking_type == "complimentary":
+            booking_cost = 0
+            payment_status = "complimentary"
+            status = "checked-in"
+        else:
+            booking_cost = room.amount * number_of_days
+            payment_status = booking.payment_status or "pending"
+            status = "reserved" if booking_type == "reservation" else "checked-in"
+
+        # Save attachment if provided
+        if attachment and attachment.filename != "":
+            upload_dir = "uploads/"
+            os.makedirs(upload_dir, exist_ok=True)
+            attachment_path = os.path.join(upload_dir, attachment.filename)
+            with open(attachment_path, "wb") as buffer:
+                shutil.copyfileobj(attachment.file, buffer)
+        else:
+            attachment_path = booking.attachment  # keep existing attachment if none provided
+
+        # Update fields
+        booking.room_number = room.room_number
+        booking.guest_name = guest_name
+        booking.gender = gender
+        booking.mode_of_identification = mode_of_identification
+        booking.identification_number = identification_number
+        booking.address = address
+        booking.arrival_date = arrival_date
+        booking.departure_date = departure_date
+        booking.booking_type = booking_type
+        booking.phone_number = phone_number
+        booking.number_of_days = number_of_days
+        booking.status = status
+        booking.room_price = room.amount if booking_type != "complimentary" else 0
+        booking.booking_cost = booking_cost
+        booking.payment_status = payment_status
+        booking.vehicle_no = vehicle_no
+        booking.attachment = attachment_path
+        booking.updated_by = current_user.username
+
+        db.commit()
+        db.refresh(booking)
+
+        return {
+            "message": f"Booking updated successfully for room {room.room_number}.",
+            "updated_booking": {
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "gender": booking.gender,
+                "address": booking.address,
+                "mode_of_identification": booking.mode_of_identification,
+                "identification_number": booking.identification_number,
+                "room_price": booking.room_price,
+                "arrival_date": booking.arrival_date,
+                "departure_date": booking.departure_date,
+                "booking_type": booking.booking_type,
+                "phone_number": booking.phone_number,
+                "number_of_days": booking.number_of_days,
+                "status": booking.status,
+                "booking_cost": booking.booking_cost,
+                "payment_status": booking.payment_status,
+                "vehicle_no": booking.vehicle_no,
+                "attachment": booking.attachment,
+            },
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+    
+  
+@router.put("/{room_number}/")
+def guest_checkout(
+    room_number: str,  # Room number is passed as a string
+    db: Session = Depends(get_db),
+):
+    """
+    Endpoint to check out a guest by room number.
+    Ensures the room exists and the booking is in a valid state before proceeding.
+    """
+    try:
+        # Step 1: Check if the room exists first
+        room = db.query(room_models.Room).filter(
+            func.lower(room_models.Room.room_number) == room_number.lower()  # Case-insensitive comparison
+        ).first()
+
+        if not room:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Room number {room_number} not found."
+            )
+
+        # Step 2: Retrieve the active booking (checked-in or reserved)
+        booking = db.query(booking_models.Booking).filter(
+            func.lower(booking_models.Booking.room_number) == room_number.lower(),
+            booking_models.Booking.status.in_(["checked-in", "reserved"])
+        ).first()
+
+        if not booking:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Room number {room_number} is not currently booked, so it's not in a valid state for checkout."
+            )
+
+        # Step 3: Update booking and room statuses
+        booking.status = "checked-out"
+        room.status = "available"
+
+        # Commit changes to the database
+        db.commit()
+
+        return {
+            "message": f"Guest checked out successfully for room number {room_number}.",
+            "room_status": room.status,
+            "booking_status": booking.status,
+        }
+
+    except HTTPException as e:
+        raise e  # Re-raise specific HTTP exceptions
+    except Exception as e:
+        db.rollback()  # Rollback on unexpected errors
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred during checkout: {str(e)}"
+        )
+
+   
+    
+@router.post("/cancel/{booking_id}/")
+def cancel_booking(
+    booking_id: int,
+    cancellation_reason: str = Query(None), 
+    db: Session = Depends(get_db),
+    current_user: schemas.UserDisplaySchema = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    """
+    Cancel a booking if no non-voided payment is tied to it. If a payment exists, raise an exception.
+    """
+    # Fetch the booking by ID
+    booking = db.query(booking_models.Booking).filter(
+        booking_models.Booking.id == booking_id, booking_models.Booking.deleted == False
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Booking with ID {booking_id} not found or already canceled."
+        )
+
+    # Check if the booking has any associated payments
+    payment = db.query(payment_models.Payment).filter(
+        payment_models.Payment.booking_id == booking_id
+    ).first()
+
+    # If payment exists and is not voided, raise an exception
+    if payment and payment.status != "voided":
+        raise HTTPException(
+            status_code=400,
+            detail="Booking is tied to a non-voided payment. Please cancel or delete the payment before canceling the booking."
+        )
+
+    # Proceed with cancellation if no valid payment exists or all payments are voided
+    try:
+        # Update the booking status to 'cancelled'
+        booking.status = "cancelled"
+        booking.deleted = True  # Mark as soft deleted, indicating cancellation
+        booking.cancellation_reason = cancellation_reason  # Store the reason for cancellation
+
+        # Update the room status to 'available'
+        room = db.query(room_models.Room).filter(
+            room_models.Room.room_number == booking.room_number
+        ).first()
+        if room:
+            room.status = "available"
+
+        db.commit()
+        return {
+            "message": f"Booking ID {booking_id} has been canceled successfully.",
+            "canceled_booking": {
+                "id": booking.id,
+                "room_number": booking.room_number,
+                "guest_name": booking.guest_name,
+                "status": booking.status,  # Showing the updated status as 'cancelled'
+                "cancellation_reason": booking.cancellation_reason,  # Showing the cancellation reason
+                "room_status": room.status if room else "N/A",  # Showing the updated room status
+                "created_by": booking.created_by,
+            },
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while canceling the booking: {str(e)}"
+        )
+
+
+
+
+
+
+@router.post("/meal-orders", response_model=restaurant_schemas.MealOrderDisplay)
+def create_meal_order(
+    order: restaurant_schemas.MealOrderCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(role_required(["restaurant"]))
+):
+
+    # ------------------------------------------------------------
+    # 1️⃣ Load all kitchen items once
+    # ------------------------------------------------------------
+    kitchen_items = (
+        db.query(store_models.StoreItem)
+        .filter(
+            func.lower(store_models.StoreItem.item_type).in_([
+                "kitchen",
+                "kitchen items",
+                "meal",
+                "food",
+            ])
+        )
+        .all()
+    )
+
+    if not kitchen_items:
+        raise HTTPException(404, "No kitchen items found in store")
+
+    kitchen_map = {item.id: item for item in kitchen_items}
+
+    # ------------------------------------------------------------
+    # 2️⃣ Validate each order item — do kitchen stock restriction
+    # ------------------------------------------------------------
+    for it in order.items:
+
+        if it.store_item_id not in kitchen_map:
+            raise HTTPException(
+                404,
+                f"Store item {it.store_item_id} not found or not a kitchen item"
+            )
+
+        store_item = kitchen_map[it.store_item_id]
+
+        # 🔥 PER-KITCHEN STOCK BALANCE
+        stock_balance = (
+            db.query(
+                func.coalesce(func.sum(store_models.StoreIssueItem.quantity), 0).label("issued"),
+                func.coalesce(
+                    func.sum(restaurant_models.MealOrderItem.store_qty_used), 
+                    0
+                ).label("used"),
+            )
+            .join(
+                store_models.StoreIssue,
+                store_models.StoreIssue.id == store_models.StoreIssueItem.issue_id
+            )
+            .outerjoin(
+                restaurant_models.MealOrderItem,
+                restaurant_models.MealOrderItem.store_item_id == store_item.id
+            )
+            .filter(store_models.StoreIssue.kitchen_id == order.location_id)  # THIS KITCHEN
+            .filter(store_models.StoreIssueItem.item_id == store_item.id)  # CORRECT FIELD
+            .first()
+        )
+
+        issued = stock_balance.issued or 0
+        used = stock_balance.used or 0
+        balance = issued - used
+
+        if balance <= 0:
+            raise HTTPException(
+                400,
+                f"'{store_item.name}' has not been issued to this kitchen."
+            )
+
+        if balance < it.quantity:
+            raise HTTPException(
+                400,
+                f"Not enough '{store_item.name}' in this kitchen. "
+                f"Requested: {it.quantity}, Available: {balance}"
+            )
+
+    # ------------------------------------------------------------
+    # 3️⃣ Create Meal Order
+    # ------------------------------------------------------------
+    db_order = restaurant_models.MealOrder(
+        order_type=order.order_type,
+        guest_name=order.guest_name,
+        room_number=order.room_number,
+        location_id=order.location_id,
+        created_at=datetime.utcnow(),
+        status=order.status or "open",
+        created_by=current_user.id,
+    )
+    db.add(db_order)
+    db.commit()
+    db.refresh(db_order)
+
+    # ------------------------------------------------------------
+    # 4️⃣ Deduct FIFO kitchen stock (correct version)
+    # ------------------------------------------------------------
+    for it in order.items:
+
+        store_item = kitchen_map[it.store_item_id]
+        qty_needed = it.quantity
+
+        # 1️⃣ Fetch all issue entries made to THIS kitchen for THIS item
+        issue_entries = (
+            db.query(store_models.StoreIssueItem)
+            .join(store_models.StoreIssue, store_models.StoreIssue.id == store_models.StoreIssueItem.issue_id)
+            .filter(store_models.StoreIssue.kitchen_id == order.location_id)
+            .filter(store_models.StoreIssueItem.item_id == store_item.id)
+            .order_by(store_models.StoreIssueItem.id)  # FIFO
+            .all()
+        )
+
+        for entry in issue_entries:
+            if qty_needed <= 0:
+                break
+
+            deduct_qty = min(entry.quantity, qty_needed)
+            entry.quantity -= deduct_qty
+            qty_needed -= deduct_qty
+            db.add(entry)
+
+        # 2️⃣ Determine price
+        if it.price_per_unit and it.price_per_unit > 0:
+            price_per_unit = it.price_per_unit
+        else:
+            menu_entry = (
+                db.query(kitchen_models.KitchenMenu)
+                .filter(kitchen_models.KitchenMenu.item_id == store_item.id)
+                .order_by(kitchen_models.KitchenMenu.id.desc())
+                .first()
+            )
+            price_per_unit = menu_entry.selling_price if menu_entry else store_item.unit_price
+
+        # 3️⃣ Save order item
+        db_item = restaurant_models.MealOrderItem(
+            order_id=db_order.id,
+            store_item_id=store_item.id,
+            quantity=it.quantity,
+            store_qty_used=it.quantity,
+            item_name=store_item.name,
+            price_per_unit=price_per_unit,
+            total_price=price_per_unit * it.quantity,
+        )
+        db.add(db_item)
+
+        db.commit()
+        db.refresh(db_order)
+        return db_order
