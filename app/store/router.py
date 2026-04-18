@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import List
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -779,11 +780,17 @@ def list_purchases(
     # =========================
     # ✅ Date filters
     # =========================
+    
+
     if start_date:
-        query = query.filter(store_models.StoreStockEntry.purchase_date >= start_date)
+        query = query.filter(
+            store_models.StoreStockEntry.purchase_date >= datetime.combine(start_date, datetime.min.time())
+        )
 
     if end_date:
-        query = query.filter(store_models.StoreStockEntry.purchase_date <= end_date)
+        query = query.filter(
+            store_models.StoreStockEntry.purchase_date < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+        )
 
     # =========================
     # ✅ Invoice filter
