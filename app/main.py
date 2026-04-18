@@ -20,7 +20,10 @@ from app.payments.router import router as payments_router
 from app.license.router import router as license_router
 from app.events.router import router as events_router
 from app.eventpayment.router import router as eventpayment_router
+
 from backup.backup import router as backup_router
+from app.importitem.router import router as importitem_router
+
 from app.bank.router import router as bank_router
 from app.store.router import router as store_router
 from app.bar.routers import router as bar_router
@@ -135,6 +138,7 @@ app.include_router(kitchen_router, prefix="/kitchen", tags=["Kitchen"])
 app.include_router(restaurant_router, prefix="/restaurant", tags=["Restaurant"])
 app.include_router(restpayment_router, prefix="/restpayment", tags=["Restaurant Payments"])
 app.include_router(backup_router)
+app.include_router(importitem_router, prefix="/importitem", tags=["Import Items"])
 
 # --------------------------------------------------
 # HEALTH
