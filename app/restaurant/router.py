@@ -65,24 +65,36 @@ def create_location(
         role_required(["restaurant", "admin", "super_admin"])
     )
 ):
-    # ✅ ONLY trigger validation (DO NOT assign)
-    resolve_business_id(current_user, business_id)
+    # -----------------------------
+    # 1️⃣ Resolve tenant (MUST assign)
+    # -----------------------------
+    business_id = resolve_business_id(current_user, business_id)
 
-    # ✅ Prevent duplicate (tenant handled automatically)
-    existing = db.query(restaurant_models.RestaurantLocation).filter(
-        restaurant_models.RestaurantLocation.name == location.name
-    ).first()
+    # -----------------------------
+    # 2️⃣ Check duplicate (PER BUSINESS ✅)
+    # -----------------------------
+    existing = (
+        db.query(restaurant_models.RestaurantLocation)
+        .filter(
+            restaurant_models.RestaurantLocation.business_id == business_id,
+            restaurant_models.RestaurantLocation.name.ilike(location.name)  # 🔥 case-insensitive
+        )
+        .first()
+    )
 
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Location '{location.name}' already exists"
+            detail=f"Location '{location.name}' already exists in this business"
         )
 
+    # -----------------------------
+    # 3️⃣ Create location
+    # -----------------------------
     db_location = restaurant_models.RestaurantLocation(
         name=location.name,
         active=getattr(location, "active", True),
-        business_id=current_user.business_id if current_user.business_id else business_id
+        business_id=business_id   # ✅ always use resolved value
     )
 
     db.add(db_location)
@@ -90,6 +102,7 @@ def create_location(
     db.refresh(db_location)
 
     return db_location
+
 
 
 # ----------------------------
