@@ -110,14 +110,18 @@ def list_locations(
         role_required(["restaurant", "admin", "super_admin"])
     )
 ):
-    # ✅ ONLY resolve (no assignment)
-    resolve_business_id(current_user, business_id)
+    # 🔥 1️⃣ MUST assign it
+    business_id = resolve_business_id(current_user, business_id)
 
-    return (
+    # 🔥 2️⃣ ALWAYS filter by tenant
+    locations = (
         db.query(restaurant_models.RestaurantLocation)
+        .filter(restaurant_models.RestaurantLocation.business_id == business_id)
         .order_by(restaurant_models.RestaurantLocation.id.asc())
         .all()
     )
+
+    return locations
 
 
 # ----------------------------
