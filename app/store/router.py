@@ -467,7 +467,7 @@ def list_items_simple_search(
             search = search.strip().lower()
 
             query = query.filter(
-                store_models.StoreItem.name.ilike(f"{search}%")  # 🔥 prefix search
+                store_models.StoreItem.name.ilike(f"%{search}%")  # 🔥 prefix search
             )
 
         # ------------------------------
