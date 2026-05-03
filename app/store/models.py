@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import os
@@ -52,7 +52,6 @@ class StoreItem(Base, BusinessMixin):
     # Relationship
     category = relationship("StoreCategory")
 
-    # ✅ Timezone-aware created_at like Booking
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -63,6 +62,11 @@ class StoreItem(Base, BusinessMixin):
     stock_entries = relationship("StoreStockEntry", back_populates="item")
     issue_items = relationship("StoreIssueItem", back_populates="item")
     meal_order_items = relationship("MealOrderItem", back_populates="store_item")
+
+    # 🔥🔥🔥 ADD THIS
+    __table_args__ = (
+        Index("idx_store_item_business_name", "business_id", "name"),
+    )
 
 
 # ----------------------------
