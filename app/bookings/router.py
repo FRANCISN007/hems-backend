@@ -501,14 +501,18 @@ def get_summary_report(
     business_id: Optional[int] = Query(None),
 
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["dashboard"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["dashboard", "super_admin"])
+    )
 ):
     try:
-        # -------------------------------
+
+        # -------------------------------------------------
         # 1️⃣ Determine business scope
-        # -------------------------------
+        # -------------------------------------------------
         if "super_admin" in current_user.roles:
             effective_business_id = business_id
+
             if not effective_business_id:
                 raise HTTPException(
                     status_code=400,
@@ -517,60 +521,86 @@ def get_summary_report(
         else:
             effective_business_id = current_user.business_id
 
-        # -------------------------------
+        # -------------------------------------------------
         # 2️⃣ Validate date range
-        # -------------------------------
+        # -------------------------------------------------
         if start_date > end_date:
             raise HTTPException(
                 status_code=400,
-                detail="Start date cannot be later than end date"
+                detail="Start date cannot be later than end date."
             )
 
-        # -------------------------------
-        # 3️⃣ Fetch bookings
-        # -------------------------------
+        # -------------------------------------------------
+        # 3️⃣ Convert to full-day datetime range
+        # IMPORTANT FIX:
+        # Start = 00:00:00
+        # End   = 23:59:59.999999
+        # -------------------------------------------------
+        start_datetime = datetime.combine(start_date, time.min)
+        end_datetime = datetime.combine(end_date, time.max)
+
+        # -------------------------------------------------
+        # 4️⃣ Fetch bookings
+        # -------------------------------------------------
         bookings = (
             db.query(booking_models.Booking)
             .filter(
                 booking_models.Booking.business_id == effective_business_id,
-                booking_models.Booking.arrival_date.between(start_date, end_date),
+
+                booking_models.Booking.arrival_date.between(
+                    start_datetime,
+                    end_datetime
+                ),
+
                 booking_models.Booking.status.notin_(["cancelled"]),
+
                 booking_models.Booking.deleted == False
             )
-            .order_by(booking_models.Booking.arrival_date.desc())
+            .order_by(
+                booking_models.Booking.arrival_date.desc()
+            )
             .all()
         )
 
         booking_ids = [b.id for b in bookings]
 
-        # -------------------------------
-        # 4️⃣ Fetch payments
-        # -------------------------------
+        # -------------------------------------------------
+        # 5️⃣ Fetch payments linked to bookings
+        # -------------------------------------------------
         payments = []
+
         if booking_ids:
             payments = (
                 db.query(payment_models.Payment)
                 .filter(
                     payment_models.Payment.business_id == effective_business_id,
+
                     payment_models.Payment.booking_id.in_(booking_ids),
-                    ~payment_models.Payment.status.in_(["voided", "cancelled"])
+
+                    ~payment_models.Payment.status.in_(
+                        ["voided", "cancelled"]
+                    )
                 )
                 .order_by(payment_models.Payment.id.desc())
                 .all()
             )
 
-        # Latest payment per booking
+        # -------------------------------------------------
+        # 6️⃣ Latest payment per booking
+        # -------------------------------------------------
         payments_by_booking = {}
+
         for p in payments:
             if p.booking_id not in payments_by_booking:
                 payments_by_booking[p.booking_id] = p
 
-        # -------------------------------
-        # 5️⃣ Format bookings (MATCH SCHEMA)
-        # -------------------------------
+        # -------------------------------------------------
+        # 7️⃣ Format bookings
+        # -------------------------------------------------
         formatted_bookings = []
 
         for b in bookings:
+
             payment = payments_by_booking.get(b.id)
 
             method_map = {
@@ -581,9 +611,23 @@ def get_summary_report(
                 "cash": "Cash"
             }
 
-            raw_method = (payment.payment_method.lower() if payment and payment.payment_method else "")
-            mode_of_payment = method_map.get(raw_method, raw_method.upper()) if payment else "N/A"
-            bank_name = payment.bank.name if payment and payment.bank else "N/A"
+            raw_method = (
+                payment.payment_method.lower()
+                if payment and payment.payment_method
+                else ""
+            )
+
+            mode_of_payment = (
+                method_map.get(raw_method, raw_method.upper())
+                if payment
+                else "N/A"
+            )
+
+            bank_name = (
+                payment.bank.name
+                if payment and payment.bank
+                else "N/A"
+            )
 
             formatted_bookings.append({
                 "id": b.id,
@@ -592,98 +636,161 @@ def get_summary_report(
                 "number_of_days": b.number_of_days,
                 "booking_type": b.booking_type,
                 "phone_number": b.phone_number,
-
-                # ✅ REQUIRED FIELD
                 "booking_date": b.booking_date,
 
                 "mode_of_payment": mode_of_payment,
                 "bank": bank_name,
-                "booking_cost": b.booking_cost,
+
+                "booking_cost": float(b.booking_cost or 0),
+
                 "created_by": b.created_by,
-                "amount_paid": float(payment.amount_paid) if payment and payment.amount_paid else 0.0,
+
+                "amount_paid": float(
+                    payment.amount_paid or 0
+                ) if payment else 0.0,
             })
 
-        # -------------------------------
-        # 6️⃣ Total booking cost
-        # -------------------------------
+        # -------------------------------------------------
+        # 8️⃣ Total booking cost
+        # -------------------------------------------------
         total_booking_cost = float(sum(
             b.booking_cost or 0
             for b in bookings
-            if b.status in ["checked-in", "checked-out", "reserved", "complimentary"]
+            if b.status in [
+                "checked-in",
+                "checked-out",
+                "reserved",
+                "complimentary"
+            ]
         ))
 
-        # -------------------------------
-        # 7️⃣ Payments summary
-        # -------------------------------
+        # -------------------------------------------------
+        # 9️⃣ Fetch ALL payments in date range
+        # FULL DAY FIX APPLIED HERE TOO
+        # -------------------------------------------------
         payments_all = (
             db.query(payment_models.Payment)
             .filter(
                 payment_models.Payment.business_id == effective_business_id,
-                payment_models.Payment.payment_date.between(start_date, end_date)
+
+                payment_models.Payment.payment_date.between(
+                    start_datetime,
+                    end_datetime
+                )
             )
             .all()
         )
 
-        total_cash = total_pos = total_transfer = 0.0
-        total_paid = total_discount = 0.0
+        # -------------------------------------------------
+        # 🔟 Payment summary
+        # -------------------------------------------------
+        total_cash = 0.0
+        total_pos = 0.0
+        total_transfer = 0.0
+
+        total_paid = 0.0
+        total_discount = 0.0
+
         bank_totals = {}
 
         for p in payments_all:
+
             if p.status in ["voided", "cancelled"]:
                 continue
 
             amount = float(p.amount_paid or 0)
             discount = float(p.discount_allowed or 0)
+
             method = (p.payment_method or "").lower()
 
             total_paid += amount
             total_discount += discount
 
+            # -----------------------------
+            # Payment method totals
+            # -----------------------------
             if method == "cash":
                 total_cash += amount
+
             elif method in ["pos", "pos_card"]:
                 total_pos += amount
+
             elif method in ["bank_transfer", "transfer"]:
                 total_transfer += amount
 
-            if p.bank and method in ["pos", "pos_card", "bank_transfer", "transfer"]:
+            # -----------------------------
+            # Bank breakdown
+            # -----------------------------
+            if (
+                p.bank and
+                method in [
+                    "pos",
+                    "pos_card",
+                    "bank_transfer",
+                    "transfer"
+                ]
+            ):
+
                 bank_name = p.bank.name
 
                 if bank_name not in bank_totals:
-                    bank_totals[bank_name] = {"pos": 0.0, "transfer": 0.0}
+                    bank_totals[bank_name] = {
+                        "pos": 0.0,
+                        "transfer": 0.0
+                    }
 
                 if method in ["pos", "pos_card"]:
                     bank_totals[bank_name]["pos"] += amount
+
                 elif method in ["bank_transfer", "transfer"]:
                     bank_totals[bank_name]["transfer"] += amount
 
-        # -------------------------------
-        # 8️⃣ Balance
-        # -------------------------------
-        total_balance_due = float(total_booking_cost - (total_paid + total_discount))
+        # -------------------------------------------------
+        # 1️⃣1️⃣ Balance
+        # -------------------------------------------------
+        total_balance_due = float(
+            total_booking_cost -
+            (total_paid + total_discount)
+        )
 
-        # -------------------------------
-        # 9️⃣ Final response
-        # -------------------------------
+        # -------------------------------------------------
+        # 1️⃣2️⃣ Final response
+        # -------------------------------------------------
         return {
             "total_bookings": len(formatted_bookings),
+
             "total_booking_cost": total_booking_cost,
+
             "total_amount_paid": total_paid,
+
             "total_discount_allowed": total_discount,
+
             "total_balance_due": total_balance_due,
+
             "bookings": formatted_bookings,
+
             "payment_summary": {
                 "cash": total_cash,
                 "pos": total_pos,
                 "transfer": total_transfer,
-                "total": total_cash + total_pos + total_transfer,
+                "total": (
+                    total_cash +
+                    total_pos +
+                    total_transfer
+                ),
             },
+
             "bank_breakdown": bank_totals
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
 
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
     
