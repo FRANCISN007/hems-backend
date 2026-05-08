@@ -1350,7 +1350,7 @@ def void_payment(
     payment_id: int,
     business_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["admin", "super_admin"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["admin", "dashboard", "super_admin"]))
 ):
     try:
 
