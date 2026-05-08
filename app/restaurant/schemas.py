@@ -84,6 +84,9 @@ class MealOrderCreate(BaseModel):
     items: List[MealOrderItemCreate]
     status: Optional[str] = "open"
 
+     # ✅ NEW CUSTOM ORDER DATE
+    created_at: Optional[datetime] = None
+
 class MealOrderItemDisplay(BaseModel):
     store_item_id: int
     item_name: str
@@ -133,6 +136,21 @@ class RestaurantSaleDisplay(BaseModel):
     items: List[MealOrderItemDisplay] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+
+# ----------------------------
+# Create Sale From Order
+# ----------------------------
+class RestaurantSaleFromOrderCreate(BaseModel):
+    served_by: str
+
+    # optional custom sales date
+    sales_date: Optional[datetime] = None
+
+
+
+
     
 
 class RestaurantMealItem(BaseModel):
