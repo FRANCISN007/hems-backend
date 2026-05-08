@@ -541,13 +541,15 @@ def get_summary_report(
 
         # -------------------------------------------------
         # 4️⃣ Fetch bookings
+        # FIX:
+        # Use booking_date instead of arrival_date
         # -------------------------------------------------
         bookings = (
             db.query(booking_models.Booking)
             .filter(
                 booking_models.Booking.business_id == effective_business_id,
 
-                booking_models.Booking.arrival_date.between(
+                booking_models.Booking.booking_date.between(
                     start_datetime,
                     end_datetime
                 ),
@@ -557,7 +559,7 @@ def get_summary_report(
                 booking_models.Booking.deleted == False
             )
             .order_by(
-                booking_models.Booking.arrival_date.desc()
+                booking_models.Booking.booking_date.desc()
             )
             .all()
         )
@@ -791,6 +793,7 @@ def get_summary_report(
             status_code=500,
             detail=str(e)
         )
+
 
 
     
