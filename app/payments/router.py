@@ -19,6 +19,8 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy import func
 
+from app.core.business import resolve_business_id
+
 
 from app.core.timezone import now_wat, to_wat
 
@@ -1012,10 +1014,24 @@ def get_debtor_list(
     debtor_name: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    business_id: Optional[int] = Query(
+        None,
+        description="Super admin must provide business_id"
+    ),
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["dashboard"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["dashboard"])
+    )
 ):
     try:
+        # ---------------------------------------------------------
+        # 1️⃣ Resolve tenant (IMPORTANT 🔥)
+        # ---------------------------------------------------------
+        business_id = resolve_business_id(current_user, business_id)
+
+        # ---------------------------------------------------------
+        # 2️⃣ Helpers
+        # ---------------------------------------------------------
         def make_naive(dt):
             if not dt:
                 return None
@@ -1027,128 +1043,234 @@ def get_debtor_list(
         start_date_obj = parse_date(start_date)
         end_date_obj = parse_date(end_date)
 
-        start_datetime = datetime.combine(start_date_obj, datetime.min.time()) if start_date_obj else None
-        end_datetime = datetime.combine(end_date_obj, datetime.max.time()) if end_date_obj else None
+        start_datetime = (
+            datetime.combine(start_date_obj, datetime.min.time())
+            if start_date_obj else None
+        )
+
+        end_datetime = (
+            datetime.combine(end_date_obj, datetime.max.time())
+            if end_date_obj else None
+        )
 
         # ---------------------------------------------------------
-        # 🟩 1. GROSS DEBT CALCULATION (NO DATE FILTERS)
+        # 3️⃣ BASE BOOKINGS QUERY (TENANT SAFE 🔥)
         # ---------------------------------------------------------
-        all_bookings = db.query(booking_models.Booking).filter(
+        base_booking_query = db.query(
+            booking_models.Booking
+        ).filter(
+            booking_models.Booking.business_id == business_id,
             booking_models.Booking.status != "cancelled",
             booking_models.Booking.payment_status != "complimentary"
+        )
+
+        # ---------------------------------------------------------
+        # 4️⃣ FETCH ROOMS ONCE (FASTER 🔥)
+        # ---------------------------------------------------------
+        rooms = db.query(
+            room_models.Room.room_number,
+            room_models.Room.amount
+        ).filter(
+            room_models.Room.business_id == business_id
         ).all()
+
+        room_map = {
+            room.room_number: room.amount or 0
+            for room in rooms
+        }
+
+        # ---------------------------------------------------------
+        # 5️⃣ FETCH PAYMENTS ONCE (FASTER 🔥)
+        # ---------------------------------------------------------
+        payments = db.query(
+            payment_models.Payment.booking_id,
+            payment_models.Payment.amount_paid,
+            payment_models.Payment.discount_allowed,
+            payment_models.Payment.payment_date
+        ).filter(
+            payment_models.Payment.business_id == business_id,
+            payment_models.Payment.status != "voided"
+        ).all()
+
+        payment_map = {}
+
+        for payment in payments:
+            if payment.booking_id not in payment_map:
+                payment_map[payment.booking_id] = {
+                    "total_paid": 0,
+                    "total_discount": 0,
+                    "last_payment_date": None
+                }
+
+            payment_map[payment.booking_id]["total_paid"] += (
+                payment.amount_paid or 0
+            )
+
+            payment_map[payment.booking_id]["total_discount"] += (
+                payment.discount_allowed or 0
+            )
+
+            if payment.payment_date:
+                current_last = payment_map[payment.booking_id]["last_payment_date"]
+
+                if (
+                    not current_last
+                    or payment.payment_date > current_last
+                ):
+                    payment_map[payment.booking_id]["last_payment_date"] = (
+                        payment.payment_date
+                    )
+
+        # ---------------------------------------------------------
+        # 🟩 6️⃣ GROSS DEBT CALCULATION
+        # ---------------------------------------------------------
+        all_bookings = base_booking_query.all()
 
         total_gross_debt = 0
 
         for booking in all_bookings:
-            room = db.query(room_models.Room).filter(
-                room_models.Room.room_number == booking.room_number
-            ).first()
 
-            if not room:
+            room_price = room_map.get(booking.room_number)
+
+            if room_price is None:
                 continue
 
-            total_due = (booking.number_of_days or 0) * (room.amount or 0)
+            total_due = (
+                (booking.number_of_days or 0)
+                * room_price
+            )
 
-            # Get all non-voided payments
-            all_payments = db.query(payment_models.Payment).filter(
-                payment_models.Payment.booking_id == booking.id,
-                payment_models.Payment.status != "voided"
-            ).all()
+            payment_data = payment_map.get(
+                booking.id,
+                {
+                    "total_paid": 0,
+                    "total_discount": 0,
+                    "last_payment_date": None
+                }
+            )
 
-            total_paid = sum(p.amount_paid or 0 for p in all_payments)
-            total_discount = sum(p.discount_allowed or 0 for p in all_payments)
+            total_paid = payment_data["total_paid"]
+            total_discount = payment_data["total_discount"]
 
-            balance_due = total_due - (total_paid + total_discount)
+            balance_due = total_due - (
+                total_paid + total_discount
+            )
 
             if balance_due > 0:
                 total_gross_debt += balance_due
 
         # ---------------------------------------------------------
-        # 🟦 2. CURRENT DEBT CALCULATION (APPLY DATE FILTERS)
+        # 🟦 7️⃣ CURRENT DEBT QUERY (WITH FILTERS)
         # ---------------------------------------------------------
-        bookings_filtered = db.query(booking_models.Booking).filter(
-            booking_models.Booking.status != "cancelled",
-            booking_models.Booking.payment_status != "complimentary"
-        )
+        filtered_query = base_booking_query
 
         if start_datetime:
-            bookings_filtered = bookings_filtered.filter(
+            filtered_query = filtered_query.filter(
                 booking_models.Booking.booking_date >= start_datetime
             )
+
         if end_datetime:
-            bookings_filtered = bookings_filtered.filter(
+            filtered_query = filtered_query.filter(
                 booking_models.Booking.booking_date <= end_datetime
             )
+
         if debtor_name:
-            bookings_filtered = bookings_filtered.filter(
-                booking_models.Booking.guest_name.ilike(f"%{debtor_name}%")
+            debtor_name = debtor_name.strip()
+
+            filtered_query = filtered_query.filter(
+                booking_models.Booking.guest_name.ilike(
+                    f"%{debtor_name}%"
+                )
             )
 
-        bookings_filtered = bookings_filtered.all()
+        bookings_filtered = filtered_query.all()
 
+        # ---------------------------------------------------------
+        # 8️⃣ BUILD DEBTOR LIST
+        # ---------------------------------------------------------
         debtor_list = []
         total_current_debt = 0
 
         for booking in bookings_filtered:
-            room = db.query(room_models.Room).filter(
-                room_models.Room.room_number == booking.room_number
-            ).first()
 
-            if not room:
+            room_price = room_map.get(booking.room_number)
+
+            if room_price is None:
                 continue
 
-            total_due = (booking.number_of_days or 0) * (room.amount or 0)
+            total_due = (
+                (booking.number_of_days or 0)
+                * room_price
+            )
 
-            all_payments = db.query(payment_models.Payment).filter(
-                payment_models.Payment.booking_id == booking.id,
-                payment_models.Payment.status != "voided"
-            ).all()
+            payment_data = payment_map.get(
+                booking.id,
+                {
+                    "total_paid": 0,
+                    "total_discount": 0,
+                    "last_payment_date": None
+                }
+            )
 
-            total_paid = sum(p.amount_paid or 0 for p in all_payments)
-            total_discount = sum(p.discount_allowed or 0 for p in all_payments)
+            total_paid = payment_data["total_paid"]
+            total_discount = payment_data["total_discount"]
 
-            balance_due = total_due - (total_paid + total_discount)
+            balance_due = total_due - (
+                total_paid + total_discount
+            )
 
             if balance_due > 0:
-                last_payment_date = max(
-                    (make_naive(p.payment_date) for p in all_payments if p.payment_date),
-                    default=None
-                )
 
                 debtor_list.append({
                     "guest_name": booking.guest_name,
                     "room_number": booking.room_number,
-                    "room_price": room.amount or 0,
+                    "room_price": room_price,
                     "number_of_days": booking.number_of_days or 0,
                     "booking_id": booking.id,
                     "booking_cost": total_due,
                     "total_paid": total_paid,
                     "discount_allowed": total_discount,
                     "amount_due": balance_due,
-                    "booking_date": make_naive(booking.booking_date),
-                    "last_payment_date": last_payment_date
+                    "booking_date": make_naive(
+                        booking.booking_date
+                    ),
+                    "last_payment_date": make_naive(
+                        payment_data["last_payment_date"]
+                    )
                 })
 
                 total_current_debt += balance_due
 
+        # ---------------------------------------------------------
+        # 9️⃣ SORT
+        # ---------------------------------------------------------
         debtor_list.sort(
             key=lambda x: x["last_payment_date"] or datetime.min,
             reverse=True
         )
 
+        # ---------------------------------------------------------
+        # 🔟 RESPONSE
+        # ---------------------------------------------------------
         return {
             "total_debtors": len(debtor_list),
             "total_current_debt": total_current_debt,
-            "total_gross_debt": total_gross_debt,  # 🔥 NOW CORRECT
+            "total_gross_debt": total_gross_debt,
             "debtors": debtor_list
         }
 
     except Exception as e:
         import traceback
-        logger.error(f"Error retrieving debtor list: {repr(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+        logger.error(
+            f"Error retrieving debtor list: "
+            f"{repr(e)}\n{traceback.format_exc()}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 
