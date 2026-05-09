@@ -859,6 +859,7 @@ def update_meal_order(
         order.order_type = data.order_type
         order.room_number = data.room_number
         order.guest_name = data.guest_name
+        order.created_at = data.created_at
         order.location_id = data.location_id
         order.kitchen_id = data.kitchen_id
 
