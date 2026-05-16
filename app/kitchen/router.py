@@ -217,7 +217,7 @@ def list_kitchens_simple(
     ),
     db: Session = Depends(get_db),
     current_user: user_schemas.UserDisplaySchema = Depends(
-        role_required(["store", "admin", "super_admin"])
+        role_required(["store", "restaurant", "admin", "super_admin"])
     )
 ):
     """
