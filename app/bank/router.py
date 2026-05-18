@@ -141,7 +141,7 @@ def list_banks(
 def list_banks_simple(
     business_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    current_user: UserDisplaySchema = Depends(role_required(["dashboard", "admin", "super_admin"]))
+    current_user: UserDisplaySchema = Depends(role_required(["dashboard", "bar", "restaurant", "admin", "super_admin"]))
 ):
     roles = set(current_user.roles)
 
