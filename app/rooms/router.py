@@ -261,10 +261,6 @@ def list_rooms(
 
 
 
-from datetime import datetime, date, time
-from typing import Optional
-from fastapi import Query
-
 @router.post("/update_status_after_checkout")
 def update_rooms_after_checkout(
     business_id: Optional[int] = Query(
@@ -277,27 +273,55 @@ def update_rooms_after_checkout(
     )
 ):
 
-    # ✅ Use Nigeria timezone (Africa/Lagos)
+    # ---------------------------------------------------------
+    # CURRENT LAGOS TIME
+    # ---------------------------------------------------------
+
+
     now = now_wat()
 
-    # ✅ Use WAT date/time
     today = now.date()
-    noon = time(12, 0, 0)
 
-    # ---------------- Enforce business scope ----------------
+    # ✅ EXACT CHECKOUT TIME = 12 NOON
+    checkout_time = time(12, 0, 0)
+
+    # ---------------------------------------------------------
+    # ENFORCE BUSINESS SCOPE
+    # ---------------------------------------------------------
+
     roles = set(current_user.roles)
 
     if "super_admin" in roles:
+
         if not business_id:
             raise HTTPException(
                 status_code=400,
                 detail="Super admin must provide business_id"
             )
+
         effective_business_id = business_id
+
     else:
         effective_business_id = current_user.business_id
 
-    # ---------------- Get bookings departing today ----------------
+    # ---------------------------------------------------------
+    # STOP BEFORE 12 NOON
+    # ---------------------------------------------------------
+
+    if now.time() < checkout_time:
+
+        return {
+            "message": "Checkout time has not reached yet",
+            "current_time_wat": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "checkout_time_wat": "12:00:00",
+            "rooms_updated": [],
+            "bookings_updated": [],
+        }
+
+    # ---------------------------------------------------------
+    # GET TODAY'S DEPARTURES
+    # ---------------------------------------------------------
+
     bookings = db.query(booking_models.Booking).filter(
         booking_models.Booking.departure_date == today,
         booking_models.Booking.status.in_([
@@ -311,50 +335,65 @@ def update_rooms_after_checkout(
     updated_rooms = []
     updated_bookings = []
 
-    # ✅ Checkout starts exactly 12:00 PM WAT
-    if now.time() >= noon:
+    # ---------------------------------------------------------
+    # PROCESS BOOKINGS
+    # ---------------------------------------------------------
 
-        for booking in bookings:
+    for booking in bookings:
 
-            # ---------------- Check overlapping booking ----------------
-            overlapping = db.query(booking_models.Booking).filter(
-                booking_models.Booking.room_number == booking.room_number,
-                booking_models.Booking.id != booking.id,
-                booking_models.Booking.status.in_([
-                    "checked-in",
-                    "reserved",
-                    "complimentary"
-                ]),
-                booking_models.Booking.arrival_date <= today,
-                booking_models.Booking.departure_date >= today,
-                booking_models.Booking.business_id == effective_business_id
-            ).first()
+        # ---------------------------------------------------------
+        # CHECK FOR OVERLAPPING ACTIVE BOOKING
+        # ---------------------------------------------------------
 
-            if overlapping:
-                continue
+        overlapping = db.query(booking_models.Booking).filter(
+            booking_models.Booking.room_number == booking.room_number,
+            booking_models.Booking.id != booking.id,
+            booking_models.Booking.status.in_([
+                "checked-in",
+                "reserved",
+                "complimentary"
+            ]),
+            booking_models.Booking.arrival_date <= today,
+            booking_models.Booking.departure_date >= today,
+            booking_models.Booking.business_id == effective_business_id
+        ).first()
 
-            # ✅ Mark booking as checked-out
-            booking.status = "checked-out"
-            updated_bookings.append(booking.id)
+        # Skip if another booking is active
+        if overlapping:
+            continue
 
-            # ✅ Update room status
-            room = db.query(room_models.Room).filter(
-                room_models.Room.room_number == booking.room_number,
-                room_models.Room.business_id == effective_business_id
-            ).first()
+        # ---------------------------------------------------------
+        # UPDATE BOOKING STATUS
+        # ---------------------------------------------------------
 
-            if room and room.status != "maintenance":
-                room.status = "available"
-                updated_rooms.append(room.room_number)
+        booking.status = "checked-out"
 
-        db.commit()
+        updated_bookings.append(booking.id)
+
+        # ---------------------------------------------------------
+        # UPDATE ROOM STATUS
+        # ---------------------------------------------------------
+
+        room = db.query(room_models.Room).filter(
+            room_models.Room.room_number == booking.room_number,
+            room_models.Room.business_id == effective_business_id
+        ).first()
+
+        if room and room.status != "maintenance":
+
+            room.status = "available"
+
+            updated_rooms.append(room.room_number)
+
+    db.commit()
 
     return {
         "message": "Room and booking statuses updated after 12 noon checkout time",
-        "current_time_wat": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "current_time_wat": now.strftime("%Y-%m-%d %H:%M:%S"),
         "rooms_updated": updated_rooms,
         "bookings_updated": updated_bookings,
     }
+
 
 
 
