@@ -299,6 +299,8 @@ class StoreStockBalance(BaseModel):
     category_name: Optional[str] = None
     item_type: Optional[str] = None   # NEW FIELD
     unit: Optional[str] = None
+    opening_stock: float = 0
+
     total_received: float
     total_issued: float
     total_adjusted: float

@@ -503,6 +503,7 @@ def list_items_simple_search(
 
 
 
+
 # --------------------------------------------------
 # List Bar Items (simple) - MULTI-TENANT SAFE
 # --------------------------------------------------
@@ -1086,88 +1087,221 @@ def issue_kitchen(
         role_required(["store", "admin"])
     ),
 ):
-    # Resolve business/tenant
+    # ----------------------------
+    # Resolve Business
+    # ----------------------------
     business_id = resolve_business_id(current_user, business_id)
 
     if not issue_data.issue_items:
-        raise HTTPException(status_code=400, detail="No items provided for issue.")
+        raise HTTPException(
+            status_code=400,
+            detail="No items provided for issue."
+        )
 
-    # Use provided issue_date or current UTC
+    # ----------------------------
+    # Issue Date
+    # ----------------------------
     issue_date = issue_data.issue_date or now_utc()
 
-    # Ensure issue_date is timezone-aware UTC
     if issue_date.tzinfo is None:
         issue_date = issue_date.replace(tzinfo=timezone.utc)
     else:
         issue_date = issue_date.astimezone(timezone.utc)
 
-    # Restrict past-date issues for non-admins (compare in WAT)
     issue_date_wat = issue_date.astimezone(WAT)
-    if issue_date_wat.date() != now_wat().date() and "admin" not in current_user.roles:
+
+    if (
+        issue_date_wat.date() != now_wat().date()
+        and "admin" not in current_user.roles
+    ):
         raise HTTPException(
             status_code=400,
             detail="Only admins can post issues for a past date."
         )
 
-    # Validate kitchen
-    kitchen = db.query(kitchen_models.Kitchen).filter(
-        kitchen_models.Kitchen.id == issue_data.kitchen_id,
-        kitchen_models.Kitchen.business_id == business_id,
-    ).first()
-    if not kitchen:
-        raise HTTPException(status_code=404, detail="Kitchen not found")
+    # ----------------------------
+    # Validate Kitchen
+    # ----------------------------
+    kitchen = (
+        db.query(kitchen_models.Kitchen)
+        .filter(
+            kitchen_models.Kitchen.id == issue_data.kitchen_id,
+            kitchen_models.Kitchen.business_id == business_id,
+        )
+        .first()
+    )
 
-    # Create StoreIssue record (store UTC in DB)
+    if not kitchen:
+        raise HTTPException(
+            status_code=404,
+            detail="Kitchen not found"
+        )
+
+    # ----------------------------
+    # Create Store Issue
+    # ----------------------------
     issue = store_models.StoreIssue(
         business_id=business_id,
         issue_to="kitchen",
         issued_by_id=current_user.id,
         kitchen_id=issue_data.kitchen_id,
-        issue_date=issue_date
+        issue_date=issue_date,
     )
+
     db.add(issue)
-    db.flush()  # get issue.id
+    db.flush()
 
     issue_items_display: List[IssueToKitchenItemDisplay] = []
 
+    # ----------------------------
+    # Process Items
+    # ----------------------------
     for item_data in issue_data.issue_items:
-        # Validate item belongs to business
-        item_obj = db.query(store_models.StoreItem).filter(
-            store_models.StoreItem.id == item_data.item_id,
-            store_models.StoreItem.business_id == business_id,
-        ).first()
+
+        item_obj = (
+            db.query(store_models.StoreItem)
+            .filter(
+                store_models.StoreItem.id == item_data.item_id,
+                store_models.StoreItem.business_id == business_id,
+            )
+            .first()
+        )
+
         if not item_obj:
             raise HTTPException(
-                status_code=404, detail=f"Item {item_data.item_id} not found"
+                status_code=404,
+                detail=f"Item {item_data.item_id} not found"
             )
 
-        # Check total stock
-        total_available_stock = (
-            db.query(func.sum(store_models.StoreStockEntry.quantity))
+        # =====================================================
+        # REAL AVAILABLE STOCK
+        # Opening + Purchases - Issues - Adjustments
+        # =====================================================
+
+        inventory = (
+            db.query(store_models.StoreInventory)
+            .filter(
+                store_models.StoreInventory.item_id == item_data.item_id,
+                store_models.StoreInventory.business_id == business_id
+            )
+            .first()
+        )
+
+        opening_stock = float(
+            inventory.opening_quantity if inventory else 0
+        )
+
+        purchased_stock = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        store_models.StoreStockEntry.original_quantity
+                    ),
+                    0
+                )
+            )
             .filter(
                 store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.business_id == business_id,
+                store_models.StoreStockEntry.business_id == business_id
             )
             .scalar()
             or 0
         )
-        if total_available_stock < item_data.quantity:
+
+        adjustments = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        store_models.StoreInventoryAdjustment.quantity_adjusted
+                    ),
+                    0
+                )
+            )
+            .filter(
+                store_models.StoreInventoryAdjustment.item_id == item_data.item_id,
+                store_models.StoreInventoryAdjustment.business_id == business_id
+            )
+            .scalar()
+            or 0
+        )
+
+        previous_issues = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        store_models.StoreIssueItem.quantity
+                    ),
+                    0
+                )
+            )
+            .join(store_models.StoreIssue)
+            .filter(
+                store_models.StoreIssueItem.item_id == item_data.item_id,
+                store_models.StoreIssue.business_id == business_id
+            )
+            .scalar()
+            or 0
+        )
+
+        restaurant_consumption = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        restaurant_models.MealOrderItem.store_qty_used
+                    ),
+                    0
+                )
+            )
+            .join(
+                restaurant_models.MealOrder,
+                restaurant_models.MealOrder.id
+                == restaurant_models.MealOrderItem.order_id
+            )
+            .filter(
+                restaurant_models.MealOrderItem.store_item_id == item_data.item_id,
+                restaurant_models.MealOrder.status == "closed",
+                restaurant_models.MealOrder.business_id == business_id
+            )
+            .scalar()
+            or 0
+        )
+
+        available_stock = (
+            opening_stock
+            + purchased_stock
+            - previous_issues
+            - restaurant_consumption
+            - adjustments
+        )
+
+        if available_stock < item_data.quantity:
             raise HTTPException(
                 status_code=400,
-                detail=f"Not enough inventory for item {item_obj.name}"
+                detail=(
+                    f"Not enough inventory for "
+                    f"{item_obj.name}. "
+                    f"Available: {available_stock}"
+                )
             )
 
-        # Create StoreIssueItem
+        # ----------------------------
+        # Create Issue Item
+        # ----------------------------
         issue_item = store_models.StoreIssueItem(
             issue_id=issue.id,
             item_id=item_data.item_id,
             quantity=item_data.quantity,
             business_id=business_id
         )
-        db.add(issue_item)
 
-        # Deduct stock FIFO
+        db.add(issue_item)
+        db.flush()
+
+        # ----------------------------
+        # FIFO Deduction
+        # ----------------------------
         remaining = item_data.quantity
+
         stock_entries = (
             db.query(store_models.StoreStockEntry)
             .filter(
@@ -1175,12 +1309,17 @@ def issue_kitchen(
                 store_models.StoreStockEntry.quantity > 0,
                 store_models.StoreStockEntry.business_id == business_id,
             )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
+            .order_by(
+                store_models.StoreStockEntry.purchase_date.asc()
+            )
             .all()
         )
+
         for entry in stock_entries:
+
             if remaining <= 0:
                 break
+
             if entry.quantity >= remaining:
                 entry.quantity -= remaining
                 remaining = 0
@@ -1188,7 +1327,9 @@ def issue_kitchen(
                 remaining -= entry.quantity
                 entry.quantity = 0
 
-        # Update kitchen inventory
+        # ----------------------------
+        # Update Kitchen Inventory
+        # ----------------------------
         kitchen_inventory = (
             db.query(kitchen_models.KitchenInventory)
             .filter(
@@ -1198,6 +1339,7 @@ def issue_kitchen(
             )
             .first()
         )
+
         if kitchen_inventory:
             kitchen_inventory.quantity += item_data.quantity
         else:
@@ -1205,37 +1347,41 @@ def issue_kitchen(
                 business_id=business_id,
                 kitchen_id=issue.kitchen_id,
                 item_id=item_data.item_id,
-                quantity=item_data.quantity
+                quantity=item_data.quantity,
             )
             db.add(kitchen_inventory)
 
-        # Prepare display response
         issue_items_display.append(
             IssueToKitchenItemDisplay(
                 item=KitchenItemMinimalDisplay(
                     id=item_obj.id,
-                    name=item_obj.name
+                    name=item_obj.name,
                 ),
-                quantity=item_data.quantity
+                quantity=item_data.quantity,
             )
         )
 
+    # ----------------------------
+    # Commit
+    # ----------------------------
     db.commit()
     db.refresh(issue)
 
-    # Safely convert issue_date to WAT for response
-    if issue.issue_date.tzinfo is None:
-        issue_date_wat = issue.issue_date.replace(tzinfo=timezone.utc).astimezone(WAT)
-    else:
-        issue_date_wat = issue.issue_date.astimezone(WAT)
+    issue_date_wat = (
+        issue.issue_date.replace(tzinfo=timezone.utc).astimezone(WAT)
+        if issue.issue_date.tzinfo is None
+        else issue.issue_date.astimezone(WAT)
+    )
 
     return IssueToKitchenDisplay(
         id=issue.id,
-        kitchen=KitchenDisplaySimple(id=kitchen.id, name=kitchen.name),
+        kitchen=KitchenDisplaySimple(
+            id=kitchen.id,
+            name=kitchen.name,
+        ),
         issue_items=issue_items_display,
-        issue_date=issue_date_wat.isoformat()  # ISO string with +01:00 TZ
+        issue_date=issue_date_wat.isoformat(),
     )
-
 
 
 @router.get("/kitchen", response_model=List[IssueToKitchenDisplay])
@@ -1771,17 +1917,82 @@ def issue_to_bar(
         if not item_obj:
             raise HTTPException(404, detail=f"Item {item_data.item_id} not found")
 
-        # Check stock availability
-        total_available_stock = (
-            db.query(func.sum(store_models.StoreStockEntry.quantity))
+        # --------------------------------------------------
+        # Calculate REAL available stock
+        # (Opening Stock + Purchases - Issues - Adjustments)
+        # --------------------------------------------------
+
+        opening_stock = (
+            db.query(store_models.StoreInventory.quantity)
+            .filter(
+                store_models.StoreInventory.item_id == item_data.item_id,
+                store_models.StoreInventory.business_id == effective_business_id
+            )
+            .scalar() or 0
+        )
+
+        purchased_stock = (
+            db.query(
+                func.coalesce(
+                    func.sum(store_models.StoreStockEntry.quantity),
+                    0
+                )
+            )
             .filter(
                 store_models.StoreStockEntry.item_id == item_data.item_id,
                 store_models.StoreStockEntry.business_id == effective_business_id
             )
             .scalar() or 0
         )
-        if total_available_stock < item_data.quantity:
-            raise HTTPException(400, detail=f"Not enough inventory for item {item_obj.name}")
+
+        adjustments = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        store_models.StoreInventoryAdjustment.quantity_adjusted
+                    ),
+                    0
+                )
+            )
+            .filter(
+                store_models.StoreInventoryAdjustment.item_id == item_data.item_id,
+                store_models.StoreInventoryAdjustment.business_id == effective_business_id
+            )
+            .scalar() or 0
+        )
+
+        previous_issues = (
+            db.query(
+                func.coalesce(
+                    func.sum(store_models.StoreIssueItem.quantity),
+                    0
+                )
+            )
+            .join(store_models.StoreIssue)
+            .filter(
+                store_models.StoreIssueItem.item_id == item_data.item_id,
+                store_models.StoreIssue.business_id == effective_business_id
+            )
+            .scalar() or 0
+        )
+
+        available_stock = (
+            opening_stock
+            + purchased_stock
+            - previous_issues
+            - adjustments
+        )
+
+        if available_stock < item_data.quantity:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Not enough inventory for item "
+                    f"{item_obj.name}. Available: {available_stock}"
+                )
+            )
+
+
 
         # Create StoreIssueItem
         issue_item = store_models.StoreIssueItem(
@@ -1792,9 +2003,17 @@ def issue_to_bar(
         )
         db.add(issue_item)
         db.flush()  # ✅ ensure issue_item.id is populated
+        
 
-        # Deduct store stock (FIFO)
+        # --------------------------------------------------
+        # Deduct stock
+        # Purchases first (FIFO)
+        # Then Opening Stock if needed
+        # --------------------------------------------------
+
         remaining = item_data.quantity
+
+        # 1️⃣ Deduct purchased stock (FIFO)
         stock_entries = (
             db.query(store_models.StoreStockEntry)
             .filter(
@@ -1802,18 +2021,43 @@ def issue_to_bar(
                 store_models.StoreStockEntry.quantity > 0,
                 store_models.StoreStockEntry.business_id == effective_business_id
             )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
+            .order_by(
+                store_models.StoreStockEntry.purchase_date.asc(),
+                store_models.StoreStockEntry.id.asc()
+            )
             .all()
         )
+
         for entry in stock_entries:
             if remaining <= 0:
                 break
+
             if entry.quantity >= remaining:
                 entry.quantity -= remaining
                 remaining = 0
             else:
                 remaining -= entry.quantity
                 entry.quantity = 0
+
+
+        # 2️⃣ Deduct from opening stock if purchases are exhausted
+        if remaining > 0:
+            inventory = (
+                db.query(store_models.StoreInventory)
+                .filter(
+                    store_models.StoreInventory.item_id == item_data.item_id,
+                    store_models.StoreInventory.business_id == effective_business_id
+                )
+                .first()
+            )
+
+            if inventory:
+                inventory.quantity -= remaining
+
+                if inventory.quantity < 0:
+                    inventory.quantity = 0
+
+                remaining = 0
 
         # Update BarInventory
         bar_inventory = (
@@ -3263,61 +3507,122 @@ def get_store_balances(
     )
 ):
     # ------------------------------
-    # 1️⃣ Resolve business (same pattern)
+    # Resolve Business
     # ------------------------------
     business_id = resolve_business_id(current_user, business_id)
 
-    # 1) Historical Adjustments
+    # ------------------------------
+    # Historical Adjustments
+    # ------------------------------
     adjustments_q = (
         db.query(
             store_models.StoreInventoryAdjustment.item_id,
-            func.coalesce(func.sum(store_models.StoreInventoryAdjustment.quantity_adjusted), 0)
-            .label("total_adjusted")
+            func.coalesce(
+                func.sum(
+                    store_models.StoreInventoryAdjustment.quantity_adjusted
+                ),
+                0
+            ).label("total_adjusted")
         )
-        .filter(store_models.StoreInventoryAdjustment.business_id == business_id)  # ✅ added
-        .group_by(store_models.StoreInventoryAdjustment.item_id)
+        .filter(
+            store_models.StoreInventoryAdjustment.business_id == business_id
+        )
+        .group_by(
+            store_models.StoreInventoryAdjustment.item_id
+        )
         .all()
     )
 
-    adjustment_map = {row.item_id: float(row.total_adjusted) for row in adjustments_q}
+    adjustment_map = {
+        row.item_id: float(row.total_adjusted)
+        for row in adjustments_q
+    }
 
-    # 2) Issues from StoreIssueItem
+    # ------------------------------
+    # Opening Stock (Imported Qty)
+    # ------------------------------
+    inventory_q = (
+        db.query(
+            store_models.StoreInventory.item_id,
+            store_models.StoreInventory.opening_quantity
+        )
+        .filter(
+            store_models.StoreInventory.business_id == business_id
+        )
+        .all()
+    )
+
+    inventory_map = {
+        row.item_id: float(row.opening_quantity or 0)
+        for row in inventory_q
+    }
+
+    # ------------------------------
+    # Store Issues
+    # ------------------------------
     issued_q = (
         db.query(
             store_models.StoreIssueItem.item_id,
-            func.coalesce(func.sum(store_models.StoreIssueItem.quantity), 0).label("total_issued")
+            func.coalesce(
+                func.sum(
+                    store_models.StoreIssueItem.quantity
+                ),
+                0
+            ).label("total_issued")
         )
         .join(store_models.StoreIssue)
-        .filter(store_models.StoreIssue.business_id == business_id)  # ✅ added
-        .group_by(store_models.StoreIssueItem.item_id)
+        .filter(
+            store_models.StoreIssue.business_id == business_id
+        )
+        .group_by(
+            store_models.StoreIssueItem.item_id
+        )
         .all()
     )
 
-    issued_map = {row.item_id: float(row.total_issued) for row in issued_q}
+    issued_map = {
+        row.item_id: float(row.total_issued)
+        for row in issued_q
+    }
 
-    # 3) Restaurant usage
+    # ------------------------------
+    # Restaurant Consumption
+    # ------------------------------
     restaurant_issued_q = (
         db.query(
             restaurant_models.MealOrderItem.store_item_id.label("item_id"),
-            func.coalesce(func.sum(restaurant_models.MealOrderItem.store_qty_used), 0)
-            .label("restaurant_issued")
+            func.coalesce(
+                func.sum(
+                    restaurant_models.MealOrderItem.store_qty_used
+                ),
+                0
+            ).label("restaurant_issued")
         )
         .join(
             restaurant_models.MealOrder,
-            restaurant_models.MealOrder.id == restaurant_models.MealOrderItem.order_id
+            restaurant_models.MealOrder.id
+            == restaurant_models.MealOrderItem.order_id
         )
         .filter(
             restaurant_models.MealOrder.status == "closed",
-            restaurant_models.MealOrder.business_id == business_id  # ✅ added
+            restaurant_models.MealOrder.business_id == business_id
         )
-        .group_by(restaurant_models.MealOrderItem.store_item_id)
+        .group_by(
+            restaurant_models.MealOrderItem.store_item_id
+        )
         .all()
     )
 
     for row in restaurant_issued_q:
-        issued_map[row.item_id] = issued_map.get(row.item_id, 0) + float(row.restaurant_issued)
+        issued_map[row.item_id] = (
+            issued_map.get(row.item_id, 0)
+            + float(row.restaurant_issued)
+        )
 
-    # 4) PURCHASES & STOCK
+    # ------------------------------
+    # ALL STORE ITEMS
+    # (Shows imported items even if never purchased)
+    # ------------------------------
     query = (
         db.query(
             store_models.StoreItem.id.label("item_id"),
@@ -3325,58 +3630,81 @@ def get_store_balances(
             store_models.StoreItem.unit.label("unit"),
             store_models.StoreItem.item_type.label("item_type"),
             store_models.StoreCategory.name.label("category_name"),
-            func.coalesce(func.sum(store_models.StoreStockEntry.original_quantity), 0)
-            .label("total_received"),
+            store_models.StoreItem.unit_price.label("default_unit_price"),
+            func.coalesce(
+                func.sum(
+                    store_models.StoreStockEntry.original_quantity
+                ),
+                0
+            ).label("total_received")
         )
-        .join(
+        .outerjoin(
             store_models.StoreStockEntry,
-            store_models.StoreItem.id == store_models.StoreStockEntry.item_id
+            store_models.StoreItem.id
+            == store_models.StoreStockEntry.item_id
         )
         .join(
             store_models.StoreCategory,
-            store_models.StoreItem.category_id == store_models.StoreCategory.id
+            store_models.StoreItem.category_id
+            == store_models.StoreCategory.id
         )
-        .filter(store_models.StoreItem.business_id == business_id)  # ✅ added
+        .filter(
+            store_models.StoreItem.business_id == business_id
+        )
     )
 
-    # ================= FILTERS (UNCHANGED) =================
-
+    # ------------------------------
+    # Filters
+    # ------------------------------
     if category_id:
-        query = query.filter(store_models.StoreItem.category_id == category_id)
+        query = query.filter(
+            store_models.StoreItem.category_id == category_id
+        )
 
     if item_type:
         query = query.filter(
-            func.lower(store_models.StoreItem.item_type) == item_type.lower()
+            func.lower(store_models.StoreItem.item_type)
+            == item_type.lower()
         )
 
     if item_id:
-        query = query.filter(store_models.StoreItem.id == item_id)
+        query = query.filter(
+            store_models.StoreItem.id == item_id
+        )
 
     if search:
         query = query.filter(
             store_models.StoreItem.name.ilike(f"%{search}%")
         )
 
-    # ================= GROUPING =================
+    # ------------------------------
+    # Grouping
+    # ------------------------------
     query = query.group_by(
         store_models.StoreItem.id,
         store_models.StoreItem.name,
         store_models.StoreItem.unit,
         store_models.StoreItem.item_type,
-        store_models.StoreCategory.name
-    ).order_by(store_models.StoreItem.name.asc())
+        store_models.StoreCategory.name,
+        store_models.StoreItem.unit_price
+    ).order_by(
+        store_models.StoreItem.name.asc()
+    )
 
     items_q = query.all()
 
-    # ================= RESPONSE =================
     response = []
 
     for item in items_q:
+
+        # ------------------------------
+        # Latest Purchase Price
+        # ------------------------------
         latest_entry = (
             db.query(store_models.StoreStockEntry)
             .filter(
                 store_models.StoreStockEntry.item_id == item.item_id,
-                store_models.StoreStockEntry.business_id == business_id  # ✅ added
+                store_models.StoreStockEntry.business_id == business_id
             )
             .order_by(
                 store_models.StoreStockEntry.purchase_date.desc(),
@@ -3385,16 +3713,40 @@ def get_store_balances(
             .first()
         )
 
-        current_unit_price = float(latest_entry.unit_price) if latest_entry else 0.0
+        if latest_entry:
+            current_unit_price = float(
+                latest_entry.unit_price or 0
+            )
+        else:
+            current_unit_price = float(
+                item.default_unit_price or 0
+            )
+
+        # ------------------------------
+        # Stock Calculation
+        # ------------------------------
+        opening_stock = inventory_map.get(item.item_id, 0)
+
+        total_received = float(item.total_received or 0)
 
         total_adjusted = adjustment_map.get(item.item_id, 0)
+
         total_issued = issued_map.get(item.item_id, 0)
 
-        balance_qty = float(item.total_received or 0) - total_issued - total_adjusted
+        balance_qty = (
+            opening_stock
+            + total_received
+            - total_issued
+            - total_adjusted
+        )
+
         if balance_qty < 0:
             balance_qty = 0
 
-        balance_value = round(balance_qty * current_unit_price, 2)
+        balance_value = round(
+            balance_qty * current_unit_price,
+            2
+        )
 
         response.append(
             store_schemas.StoreStockBalance(
@@ -3403,10 +3755,15 @@ def get_store_balances(
                 category_name=item.category_name,
                 item_type=item.item_type,
                 unit=item.unit,
-                total_received=float(item.total_received or 0),
+
+                opening_stock=opening_stock,
+
+                total_received=total_received,
                 total_issued=total_issued,
                 total_adjusted=total_adjusted,
+
                 balance=balance_qty,
+
                 current_unit_price=current_unit_price,
                 balance_total_amount=balance_value,
             )

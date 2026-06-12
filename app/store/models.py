@@ -172,6 +172,10 @@ class StoreInventory(Base, BusinessMixin):
 
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("store_items.id"), unique=True, nullable=False)
+
+    # Original imported quantity
+    opening_quantity = Column(Float, default=0)
+
     quantity = Column(Integer, default=0)
 
     # ✅ Timezone-aware last_updated like Booking
