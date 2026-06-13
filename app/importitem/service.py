@@ -55,6 +55,7 @@ def import_from_excel(
             unit_price = float(row.get("unit_price") or 0)
             selling_price = float(row.get("selling_price") or 0)
             item_type = str(row.get("item_type") or "").strip() or None
+            opening_stock = float(row.get("opening_stock") or 0)
             category_id = row.get("category_id")
 
             if not name or not unit:
@@ -104,10 +105,23 @@ def import_from_excel(
                 unit_price=unit_price,
                 selling_price=selling_price,
                 item_type=item_type,
-                business_id=business_id,   # 🔥 VERY IMPORTANT
+                business_id=business_id,
             )
 
             db.add(item)
+
+            # Get generated item.id
+            db.flush()
+
+            inventory = store_models.StoreInventory(
+                item_id=item.id,
+                opening_quantity=opening_stock,
+                quantity=opening_stock,
+                business_id=business_id
+            )
+
+            db.add(inventory)
+
             created += 1
 
         except Exception:
