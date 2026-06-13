@@ -3459,8 +3459,13 @@ def get_kitchen_stock_balance(
                 .first()
             )
 
-            unit_price = float(latest_entry.unit_price) if latest_entry else None
-            balance_total_amount = round(balance * unit_price, 2) if unit_price else None
+            if latest_entry:
+                unit_price = float(latest_entry.unit_price or 0)
+            else:
+                # fallback for imported items
+                unit_price = float(item.unit_price or 0)
+
+            balance_total_amount = round(balance * unit_price, 2)
 
             results.append(
                 kitchen_schemas.KitchenStockBalance(
