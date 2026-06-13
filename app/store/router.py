@@ -3204,7 +3204,9 @@ def get_bar_stock_balance(
                 ):
                     continue
 
-            # Latest unit price (tenant-safe)
+            # --------------------------------
+            # Latest Purchase Price
+            # --------------------------------
             latest_stock = (
                 db.query(store_models.StoreStockEntry)
                 .filter(
@@ -3218,8 +3220,15 @@ def get_bar_stock_balance(
                 .first()
             )
 
-            unit_price = float(latest_stock.unit_price) if latest_stock and latest_stock.unit_price else None
-            balance_total_amount = round(balance * unit_price, 2) if unit_price else None
+            if latest_stock:
+                unit_price = float(latest_stock.unit_price or 0)
+            else:
+                unit_price = float(item.unit_price or 0)
+
+            balance_total_amount = round(
+                balance * unit_price,
+                2
+            )
 
             results.append(
                 bar_schemas.BarStockBalance(
