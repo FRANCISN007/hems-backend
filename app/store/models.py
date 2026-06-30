@@ -73,7 +73,7 @@ class StoreItem(Base, BusinessMixin):
 # 3. Store Stock Entry (Purchase)
 # ----------------------------
 class StoreStockEntry(Base, BusinessMixin):
-    __tablename__ = "store_stock_entries"
+    __tablename__ = "store_purchases"
 
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("store_items.id"), nullable=False)
