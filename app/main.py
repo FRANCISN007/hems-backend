@@ -158,7 +158,16 @@ REACT_BUILD_DIR = BASE_DIR / "react-frontend" / "build"
 REACT_STATIC_DIR = REACT_BUILD_DIR / "static"
 INDEX_FILE = REACT_BUILD_DIR / "index.html"
 
+
+# 👇 Add this here
+print("Build directory:", REACT_BUILD_DIR)
+
 if REACT_BUILD_DIR.exists():
+    print("Build directory contents:")
+    for f in REACT_BUILD_DIR.iterdir():
+        print(" -", f.name)
+
+
 
     # Serve React static assets
     app.mount("/static", StaticFiles(directory=REACT_STATIC_DIR), name="static")
