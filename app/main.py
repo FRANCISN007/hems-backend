@@ -20,8 +20,8 @@ from app.payments.router import router as payments_router
 from app.license.router import router as license_router
 from app.events.router import router as events_router
 from app.eventpayment.router import router as eventpayment_router
-
 from backup.backup import router as backup_router
+
 from app.importitem.router import router as importitem_router
 
 from app.bank.router import router as bank_router
@@ -43,9 +43,7 @@ from contextlib import asynccontextmanager
 
 from app.core.tenant_middleware import TenantMiddleware
 
-app = FastAPI()
 
-app.add_middleware(TenantMiddleware)
 
 # --------------------------------------------------
 # ENV LOADING (works for installer / frozen mode)
@@ -99,6 +97,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.add_middleware(TenantMiddleware)
 
 # --------------------------------------------------
 # CORS (LAN SAFE)
@@ -159,7 +159,14 @@ REACT_STATIC_DIR = REACT_BUILD_DIR / "static"
 INDEX_FILE = REACT_BUILD_DIR / "index.html"
 
 if REACT_BUILD_DIR.exists():
+
+    # Serve React static assets
     app.mount("/static", StaticFiles(directory=REACT_STATIC_DIR), name="static")
+
+    # Serve images
+    app.mount("/images", StaticFiles(directory=REACT_BUILD_DIR / "images"), name="images")
+
+    print(f"[INFO] React build detected: {REACT_BUILD_DIR}")
     print(f"[INFO] React build detected: {REACT_BUILD_DIR}")
 else:
     print("[WARNING] React build not found")
@@ -173,10 +180,26 @@ async def spa_fallback(request: Request, call_next):
 
     # If API route → return JSON normally
     if request.url.path.startswith((
-        "/users", "/rooms", "/bookings", "/payments", "/events",
-        "/eventpayment", "/license", "/store", "/bar", "/vendor",
-        "/kitchen", "/restaurant", "/restpayment", "/bank",
-        "/backup", "/files", "/static", "/health", "/debug"
+        "/users",
+        "/rooms",
+        "/bookings",
+        "/payments",
+        "/events",
+        "/eventpayment",
+        "/license",
+        "/store",
+        "/bar",
+        "/vendor",
+        "/kitchen",
+        "/restaurant",
+        "/restpayment",
+        "/bank",
+        "/backup",
+        "/files",
+        "/static",
+        "/images",
+        "/health",
+        "/debug"
     )):
         return response
 
