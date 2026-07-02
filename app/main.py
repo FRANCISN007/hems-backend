@@ -187,7 +187,7 @@ else:
 # --------------------------------------------------
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
-    return FileResponse(REACT_BUILD_DIR / "favicon.ico")
+    return FileResponse(REACT_BUILD_DIR / "images" / "hems-logo1.ico")
 
 
 @app.get("/manifest.json", include_in_schema=False)
