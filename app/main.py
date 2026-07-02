@@ -198,7 +198,11 @@ def sitemap():
 
 @app.get("/googleb9019794261073a2.html", include_in_schema=False)
 def google_verification():
-    return FileResponse(REACT_BUILD_DIR / "googleb9019794261073a2.html")
+    file = REACT_BUILD_DIR / "googleb9019794261073a2.html"
+    print("Google verification file:", file)
+    print("Exists:", file.exists())
+    return FileResponse(file)
+
 
 
 
