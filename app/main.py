@@ -171,6 +171,37 @@ if REACT_BUILD_DIR.exists():
 else:
     print("[WARNING] React build not found")
 
+
+
+# --------------------------------------------------
+# SEO FILES
+# --------------------------------------------------
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(REACT_BUILD_DIR / "favicon.ico")
+
+
+@app.get("/manifest.json", include_in_schema=False)
+def manifest():
+    return FileResponse(REACT_BUILD_DIR / "manifest.json")
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    return FileResponse(REACT_BUILD_DIR / "robots.txt")
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap():
+    return FileResponse(REACT_BUILD_DIR / "sitemap.xml")
+
+
+@app.get("/googleb9019794261073a2.html", include_in_schema=False)
+def google_verification():
+    return FileResponse(REACT_BUILD_DIR / "googleb9019794261073a2.html")
+
+
+
 # --------------------------------------------------
 # SPA FALLBACK (CRITICAL FIX)
 # --------------------------------------------------
@@ -198,6 +229,11 @@ async def spa_fallback(request: Request, call_next):
         "/files",
         "/static",
         "/images",
+        "/favicon.ico",
+        "/manifest.json",
+        "/robots.txt",
+        "/sitemap.xml",
+        "/googleb9019794261073a2.html",
         "/health",
         "/debug"
     )):
