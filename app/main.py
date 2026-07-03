@@ -103,9 +103,17 @@ app.add_middleware(TenantMiddleware)
 # --------------------------------------------------
 # CORS (LAN SAFE)
 # --------------------------------------------------
+origins = [
+    "https://hemshotel.com",
+    "https://www.hemshotel.com",
+    "https://hems-frontend-production.up.railway.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -188,16 +196,6 @@ else:
 
 
 from fastapi.responses import JSONResponse
-
-@app.get("/googleb9019794261073a2.html", include_in_schema=False)
-def google_verification():
-    file = REACT_BUILD_DIR / "googleb9019794261073a2.html"
-
-    return JSONResponse({
-        "build_dir": str(REACT_BUILD_DIR),
-        "file": str(file),
-        "exists": file.exists(),
-    })
 
 
 @app.get("/favicon.ico", include_in_schema=False)
