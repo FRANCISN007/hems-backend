@@ -185,6 +185,21 @@ else:
 # --------------------------------------------------
 # SEO FILES
 # --------------------------------------------------
+
+
+from fastapi.responses import JSONResponse
+
+@app.get("/googleb9019794261073a2.html", include_in_schema=False)
+def google_verification():
+    file = REACT_BUILD_DIR / "googleb9019794261073a2.html"
+
+    return JSONResponse({
+        "build_dir": str(REACT_BUILD_DIR),
+        "file": str(file),
+        "exists": file.exists(),
+    })
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return FileResponse(REACT_BUILD_DIR / "images" / "hems-logo1.ico")
