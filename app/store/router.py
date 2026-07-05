@@ -2392,38 +2392,23 @@ def update_bar_issue(
             item_id=item.item_id,
         )
 
+        old_qty = (
+            db.query(
+                func.coalesce(
+                    func.sum(store_models.StoreIssueItem.quantity),
+                    0
+                )
+            )
+            .filter(
+                store_models.StoreIssueItem.issue_id == issue.id,
+                store_models.StoreIssueItem.item_id == item.item_id,
+            )
+            .scalar()
+        )
+
+        available += old_qty
+
         if available < item.quantity:
-
-            #
-            # Restore old issue items
-            # before raising an error.
-            #
-     # ----------------------------------
-            # 5️⃣ Update Issue Header
-            # ----------------------------------
-            issue.bar_id = update_data.issued_to_id
-            issue.issue_date = (
-                update_data.issue_date
-                or datetime.now(timezone.utc)
-            )
-            issue.issued_by_id = current_user.id
-
-            # ----------------------------------
-            # 6️⃣ Remove Existing Items
-            # ----------------------------------
-            db.query(store_models.StoreIssueItem).filter(
-                store_models.StoreIssueItem.issue_id == issue.id
-            ).delete(synchronize_session=False)
-
-            db.flush()
-
-            issue_items_display = []
-
-            rebuild_everything(
-                db=db,
-                business_id=effective_business_id,
-            )
-
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -2432,6 +2417,8 @@ def update_bar_issue(
                     f"Available: {available}"
                 )
             )
+
+            
 
     # ----------------------------------
     # 8️⃣ Update Header
@@ -2445,6 +2432,16 @@ def update_bar_issue(
     issue.issued_by_id = current_user.id
 
     issue_items_display = []
+
+
+    # ----------------------------------
+    # Remove Existing Issue Items
+    # ----------------------------------
+    db.query(store_models.StoreIssueItem).filter(
+        store_models.StoreIssueItem.issue_id == issue.id
+    ).delete(synchronize_session=False)
+
+    db.flush()
 
 
 
@@ -2463,56 +2460,7 @@ def update_bar_issue(
             .first()
         )
 
-        remaining = item.quantity
-
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == item.item_id,
-                store_models.StoreStockEntry.quantity > 0,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
-            .all()
-        )
-
-        for entry in stock_entries:
-
-            if remaining <= 0:
-                break
-
-            if entry.quantity >= remaining:
-                entry.quantity -= remaining
-                remaining = 0
-            else:
-                remaining -= entry.quantity
-                entry.quantity = 0
-
-        # ------------------------------
-        # Update bar inventory
-        # ------------------------------
-        bar_inv = (
-            db.query(bar_models.BarInventory)
-            .filter(
-                bar_models.BarInventory.bar_id == issue.bar_id,
-                bar_models.BarInventory.item_id == item.item_id,
-                bar_models.BarInventory.business_id == effective_business_id
-            )
-            .first()
-        )
-
-        if bar_inv:
-            bar_inv.quantity += item.quantity
-        else:
-            bar_inv = bar_models.BarInventory(
-                business_id=effective_business_id,
-                bar_id=issue.bar_id,
-                item_id=item.item_id,
-                quantity=item.quantity,
-                selling_price=item_obj.selling_price
-            )
-            db.add(bar_inv)
-
+        
         issue_item = store_models.StoreIssueItem(
             business_id=effective_business_id,
             issue_id=issue.id,
