@@ -1918,70 +1918,33 @@ def issue_to_bar(
             raise HTTPException(404, detail=f"Item {item_data.item_id} not found")
 
         # --------------------------------------------------
-        # Calculate REAL available stock
-        # (Opening Stock + Purchases - Issues - Adjustments)
+        # Current available stock
+        # (Current Opening Balance + Current Purchase Balance)
         # --------------------------------------------------
 
         opening_stock = (
-            db.query(store_models.StoreInventory.quantity)
+            db.query(
+                func.coalesce(func.sum(store_models.StoreInventory.quantity), 0)
+            )
             .filter(
                 store_models.StoreInventory.item_id == item_data.item_id,
-                store_models.StoreInventory.business_id == effective_business_id
+                store_models.StoreInventory.business_id == effective_business_id,
             )
-            .scalar() or 0
+            .scalar()
         )
 
         purchased_stock = (
             db.query(
-                func.coalesce(
-                    func.sum(store_models.StoreStockEntry.quantity),
-                    0
-                )
+                func.coalesce(func.sum(store_models.StoreStockEntry.quantity), 0)
             )
             .filter(
                 store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
+                store_models.StoreStockEntry.business_id == effective_business_id,
             )
-            .scalar() or 0
+            .scalar()
         )
 
-        adjustments = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        store_models.StoreInventoryAdjustment.quantity_adjusted
-                    ),
-                    0
-                )
-            )
-            .filter(
-                store_models.StoreInventoryAdjustment.item_id == item_data.item_id,
-                store_models.StoreInventoryAdjustment.business_id == effective_business_id
-            )
-            .scalar() or 0
-        )
-
-        previous_issues = (
-            db.query(
-                func.coalesce(
-                    func.sum(store_models.StoreIssueItem.quantity),
-                    0
-                )
-            )
-            .join(store_models.StoreIssue)
-            .filter(
-                store_models.StoreIssueItem.item_id == item_data.item_id,
-                store_models.StoreIssue.business_id == effective_business_id
-            )
-            .scalar() or 0
-        )
-
-        available_stock = (
-            opening_stock
-            + purchased_stock
-            - previous_issues
-            - adjustments
-        )
+        available_stock = opening_stock + purchased_stock
 
         if available_stock < item_data.quantity:
             raise HTTPException(
