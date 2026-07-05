@@ -18,6 +18,11 @@ from app.store import schemas as store_schemas
 from app.bar.models import BarInventory 
 from app.bar.models import Bar 
 
+from app.store.inventory_service import (
+    rebuild_everything,
+    calculate_available_stock,
+    deduct_fifo_stock,
+)
 
 from app.store.schemas import IssueCreate, IssueDisplay
 from app.kitchen.models import Kitchen, KitchenInventory
@@ -2278,130 +2283,171 @@ def get_item_stock(
 def update_bar_issue(
     issue_id: int,
     update_data: store_schemas.IssueCreate,
-    business_id: Optional[int] = Query(None, description="Super admin can optionally specify business"),
+    business_id: Optional[int] = Query(
+        None,
+        description="Super admin can optionally specify business"
+    ),
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["store","admin","super_admin"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["store", "admin", "super_admin"])
+    ),
 ):
 
     roles = [r.lower() for r in current_user.roles]
 
-    # ------------------------------
-    # 1️⃣ Get issue first
-    # ------------------------------
-    issue = db.query(store_models.StoreIssue).filter(
-        store_models.StoreIssue.id == issue_id
-    ).first()
+    # ----------------------------------
+    # 1️⃣ Fetch Issue
+    # ----------------------------------
+    issue = (
+        db.query(store_models.StoreIssue)
+        .filter(store_models.StoreIssue.id == issue_id)
+        .first()
+    )
 
     if not issue:
-        raise HTTPException(status_code=404, detail="Issue not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Issue not found"
+        )
 
     if issue.issue_to != "bar":
-        raise HTTPException(status_code=400, detail="Only bar issues can be updated")
+        raise HTTPException(
+            status_code=400,
+            detail="Only bar issues can be updated"
+        )
 
-    # ------------------------------
-    # 2️⃣ Resolve business
-    # ------------------------------
+    # ----------------------------------
+    # 2️⃣ Resolve Business
+    # ----------------------------------
     if "super_admin" in roles:
-        effective_business_id = business_id if business_id else issue.business_id
+
+        effective_business_id = (
+            business_id if business_id else issue.business_id
+        )
+
     else:
+
         effective_business_id = current_user.business_id
 
-    # ------------------------------
-    # 3️⃣ Validate bar exists
-    # ------------------------------
+    # ----------------------------------
+    # 3️⃣ Validate Bar
+    # ----------------------------------
     bar_obj = (
         db.query(bar_models.Bar)
         .filter(
             bar_models.Bar.id == update_data.issued_to_id,
-            bar_models.Bar.business_id == effective_business_id
+            bar_models.Bar.business_id == effective_business_id,
         )
         .first()
     )
 
     if not bar_obj:
-        raise HTTPException(status_code=404, detail="Bar not found")
-
-    # ------------------------------
-    # 4️⃣ Rollback old issue
-    # ------------------------------
-    for old_item in issue.issue_items:
-
-        remaining = old_item.quantity
-
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == old_item.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .order_by(store_models.StoreStockEntry.purchase_date.desc())
-            .all()
+        raise HTTPException(
+            status_code=404,
+            detail="Bar not found"
         )
 
-        for entry in stock_entries:
-            if remaining <= 0:
-                break
+    # ----------------------------------
+    # 4️⃣ Validate Every Item Exists
+    # ----------------------------------
+    item_cache = {}
 
-            entry.quantity += remaining
-            remaining = 0
-
-        bar_inv = (
-            db.query(bar_models.BarInventory)
-            .filter(
-                bar_models.BarInventory.bar_id == issue.bar_id,
-                bar_models.BarInventory.item_id == old_item.item_id,
-                bar_models.BarInventory.business_id == effective_business_id
-            )
-            .first()
-        )
-
-        if bar_inv:
-            bar_inv.quantity = max(0, bar_inv.quantity - old_item.quantity)
-
-    db.query(store_models.StoreIssueItem).filter(
-        store_models.StoreIssueItem.issue_id == issue_id
-    ).delete()
-
-    # ------------------------------
-    # 5️⃣ Validate stock
-    # ------------------------------
     for item in update_data.issue_items:
 
         item_obj = (
             db.query(store_models.StoreItem)
             .filter(
                 store_models.StoreItem.id == item.item_id,
-                store_models.StoreItem.business_id == effective_business_id
+                store_models.StoreItem.business_id == effective_business_id,
             )
             .first()
         )
 
         if not item_obj:
-            raise HTTPException(status_code=404, detail=f"Item {item.item_id} not found")
 
-        available = (
-            db.query(func.sum(store_models.StoreStockEntry.quantity))
-            .filter(
-                store_models.StoreStockEntry.item_id == item.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
+            raise HTTPException(
+                status_code=404,
+                detail=f"Item {item.item_id} not found"
             )
-            .scalar()
-        ) or 0
+
+        item_cache[item.item_id] = item_obj
+
+    # ----------------------------------
+    # 5️⃣ Remove Current Issue Items
+    # ----------------------------------
+    #
+    
+    # ----------------------------------
+    # 7️⃣ Validate Stock
+    # ----------------------------------
+    #
+    # Inventory now represents
+    # every issue EXCEPT this one.
+    #
+    for item in update_data.issue_items:
+
+        available = calculate_available_stock(
+            db=db,
+            business_id=effective_business_id,
+            item_id=item.item_id,
+        )
 
         if available < item.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Not enough stock for item {item_obj.name}"
+
+            #
+            # Restore old issue items
+            # before raising an error.
+            #
+     # ----------------------------------
+            # 5️⃣ Update Issue Header
+            # ----------------------------------
+            issue.bar_id = update_data.issued_to_id
+            issue.issue_date = (
+                update_data.issue_date
+                or datetime.now(timezone.utc)
+            )
+            issue.issued_by_id = current_user.id
+
+            # ----------------------------------
+            # 6️⃣ Remove Existing Items
+            # ----------------------------------
+            db.query(store_models.StoreIssueItem).filter(
+                store_models.StoreIssueItem.issue_id == issue.id
+            ).delete(synchronize_session=False)
+
+            db.flush()
+
+            issue_items_display = []
+
+            rebuild_everything(
+                db=db,
+                business_id=effective_business_id,
             )
 
-    # ------------------------------
-    # 6️⃣ Update issue header
-    # ------------------------------
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Not enough inventory for item "
+                    f"{item_cache[item.item_id].name}. "
+                    f"Available: {available}"
+                )
+            )
+
+    # ----------------------------------
+    # 8️⃣ Update Header
+    # ----------------------------------
     issue.bar_id = update_data.issued_to_id
-    issue.issue_date = update_data.issue_date or datetime.now(timezone.utc)
+    issue.issue_date = (
+        update_data.issue_date
+        or datetime.now(timezone.utc)
+    )
+
     issue.issued_by_id = current_user.id
 
-    issue_items_display: List[store_schemas.IssueItemDisplay] = []
+    issue_items_display = []
+
+
+
 
     # ------------------------------
     # 7️⃣ Apply new issue (FIFO)
