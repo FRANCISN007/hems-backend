@@ -662,6 +662,99 @@ def delete_item(
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
 
+    purchase_exists = (
+        db.query(store_models.StoreStockEntry)
+        .filter(
+            store_models.StoreStockEntry.item_id == item_id,
+            store_models.StoreStockEntry.business_id == business_id,
+        )
+        .first()
+    )
+
+    if purchase_exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete item because it has purchase history."
+        )
+    
+    issue_exists = (
+        db.query(store_models.StoreIssueItem)
+        .filter(
+            store_models.StoreIssueItem.item_id == item_id,
+            store_models.StoreIssueItem.business_id == business_id,
+        )
+        .first()
+    )
+
+    if issue_exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete item because it has issue history."
+        )
+
+
+
+    store_inventory = (
+        db.query(store_models.StoreInventory)
+        .filter(
+            store_models.StoreInventory.item_id == item_id,
+            store_models.StoreInventory.business_id == business_id,
+        )
+        .first()
+    )
+
+    if store_inventory:
+
+        if store_inventory.quantity > 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete item because store inventory is greater than zero."
+            )
+
+        db.delete(store_inventory)
+
+
+    kitchen_inventory = (
+        db.query(kitchen_models.KitchenInventory)
+        .filter(
+            kitchen_models.KitchenInventory.item_id == item_id,
+            kitchen_models.KitchenInventory.business_id == business_id,
+        )
+        .all()
+    )
+
+    for inv in kitchen_inventory:
+
+        if inv.quantity > 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete item because kitchen inventory is greater than zero."
+            )
+
+        db.delete(inv)
+
+
+    bar_inventory = (
+        db.query(bar_models.BarInventory)
+        .filter(
+            bar_models.BarInventory.item_id == item_id,
+            bar_models.BarInventory.business_id == business_id,
+        )
+        .all()
+    )
+
+    for inv in bar_inventory:
+
+        if inv.quantity > 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete item because bar inventory is greater than zero."
+            )
+
+        db.delete(inv)
+
+
+
     db.delete(item)
     db.commit()
 
