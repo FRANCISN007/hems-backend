@@ -2066,60 +2066,12 @@ def issue_to_bar(
         db.flush()  # ✅ ensure issue_item.id is populated
         
 
-        # --------------------------------------------------
-        # Deduct stock
-        # Purchases first (FIFO)
-        # Then Opening Stock if needed
-        # --------------------------------------------------
-
-        remaining = item_data.quantity
-
-        # 1️⃣ Deduct purchased stock (FIFO)
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.quantity > 0,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .order_by(
-                store_models.StoreStockEntry.purchase_date.asc(),
-                store_models.StoreStockEntry.id.asc()
-            )
-            .all()
+        deduct_fifo_stock(
+            db=db,
+            business_id=effective_business_id,
+            item_id=item_data.item_id,
+            quantity=item_data.quantity,
         )
-
-        for entry in stock_entries:
-            if remaining <= 0:
-                break
-
-            if entry.quantity >= remaining:
-                entry.quantity -= remaining
-                remaining = 0
-            else:
-                remaining -= entry.quantity
-                entry.quantity = 0
-
-
-        # 2️⃣ Deduct from opening stock if purchases are exhausted
-        if remaining > 0:
-            inventory = (
-                db.query(store_models.StoreInventory)
-                .filter(
-                    store_models.StoreInventory.item_id == item_data.item_id,
-                    store_models.StoreInventory.business_id == effective_business_id
-                )
-                .first()
-            )
-
-            if inventory:
-                inventory.quantity -= remaining
-
-                if inventory.quantity < 0:
-                    inventory.quantity = 0
-
-                remaining = 0
-
         # Update BarInventory
         bar_inventory = (
             db.query(bar_models.BarInventory)

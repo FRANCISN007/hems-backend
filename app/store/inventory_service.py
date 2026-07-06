@@ -97,20 +97,27 @@ def deduct_fifo_stock(
 
     if remaining > 0:
 
-        inventory = (
+        inventories = (
             db.query(store_models.StoreInventory)
             .filter(
                 store_models.StoreInventory.business_id == business_id,
-                store_models.StoreInventory.item_id == item_id
+                store_models.StoreInventory.item_id == item_id,
+                store_models.StoreInventory.quantity > 0
             )
-            .first()
+            .order_by(store_models.StoreInventory.id.asc())
+            .all()
         )
 
-        if inventory:
+        for inventory in inventories:
 
-            inventory.quantity -= remaining
+            if remaining <= 0:
+                break
 
-            if inventory.quantity < 0:
+            if inventory.quantity >= remaining:
+                inventory.quantity -= remaining
+                remaining = 0
+            else:
+                remaining -= inventory.quantity
                 inventory.quantity = 0
 
 
