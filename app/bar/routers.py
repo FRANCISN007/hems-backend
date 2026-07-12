@@ -653,13 +653,12 @@ def create_bar_sale(
                 )
 
             # -------------------------------------------------
-            # 6️⃣ Validate stock
+            # 6️⃣ Allow negative inventory
             # -------------------------------------------------
-            if inventory.quantity < item_data.quantity:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Insufficient stock for {store_item.name}"
-                )
+            # Do not block sales when stock is insufficient.
+            # Inventory can become negative and should be reconciled later.
+
+            inventory.quantity -= item_data.quantity
 
             # -------------------------------------------------
             # 7️⃣ Selling price validation
@@ -676,11 +675,7 @@ def create_bar_sale(
             if not store_item.selling_price:
                 store_item.selling_price = selling_price
 
-            # -------------------------------------------------
-            # 8️⃣ Deduct stock
-            # -------------------------------------------------
-            inventory.quantity -= item_data.quantity
-
+            
             # -------------------------------------------------
             # 9️⃣ Calculate totals
             # -------------------------------------------------
