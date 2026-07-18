@@ -2016,33 +2016,15 @@ def issue_to_bar(
             raise HTTPException(404, detail=f"Item {item_data.item_id} not found")
 
         # --------------------------------------------------
-        # Current available stock
-        # (Current Opening Balance + Current Purchase Balance)
+        # Current Available Stock
+        # (Opening + Purchases + Adjustments)
         # --------------------------------------------------
 
-        opening_stock = (
-            db.query(
-                func.coalesce(func.sum(store_models.StoreInventory.quantity), 0)
-            )
-            .filter(
-                store_models.StoreInventory.item_id == item_data.item_id,
-                store_models.StoreInventory.business_id == effective_business_id,
-            )
-            .scalar()
+        available_stock = calculate_available_stock(
+            db=db,
+            business_id=effective_business_id,
+            item_id=item_data.item_id,
         )
-
-        purchased_stock = (
-            db.query(
-                func.coalesce(func.sum(store_models.StoreStockEntry.quantity), 0)
-            )
-            .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id,
-            )
-            .scalar()
-        )
-
-        available_stock = opening_stock + purchased_stock
 
         if available_stock < item_data.quantity:
             raise HTTPException(
@@ -2655,84 +2637,143 @@ def delete_bar_issue(
 @router.post("/adjust", response_model=store_schemas.StoreInventoryAdjustmentDisplay)
 def adjust_store_inventory(
     adjustment_data: store_schemas.StoreInventoryAdjustmentCreate,
-    business_id: Optional[int] = Query(None, description="Super admin can specify business"),
-    db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["admin","super_admin"]))
+    business_id: Optional[int] = Query(
+        None,
+        description="Super admin can specify business"
+    ),
+    db: Session =Depends(get_db),
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["admin", "super_admin"])
+    )
 ):
 
     roles = [r.lower() for r in current_user.roles]
 
-    # ------------------------------
-    # Resolve business
-    # ------------------------------
+    # ----------------------------------------------------
+    # Resolve Business
+    # ----------------------------------------------------
     if "super_admin" in roles:
-        effective_business_id = business_id if business_id else current_user.business_id
+        effective_business_id = (
+            business_id if business_id
+            else current_user.business_id
+        )
     else:
         effective_business_id = current_user.business_id
 
-    # ------------------------------
-    # Validate item
-    # ------------------------------
-    item_obj = db.query(store_models.StoreItem).filter(
-        store_models.StoreItem.id == adjustment_data.item_id,
-        store_models.StoreItem.business_id == effective_business_id
-    ).first()
-
-    if not item_obj:
-        raise HTTPException(status_code=404, detail="Item not found")
-
-    # ------------------------------
-    # Get latest stock entry
-    # ------------------------------
-    latest_entry = (
-        db.query(store_models.StoreStockEntry)
+    # ----------------------------------------------------
+    # Validate Item
+    # ----------------------------------------------------
+    item_obj = (
+        db.query(store_models.StoreItem)
         .filter(
-            store_models.StoreStockEntry.item_id == adjustment_data.item_id,
-            store_models.StoreStockEntry.business_id == effective_business_id,
-            store_models.StoreStockEntry.quantity > 0
+            store_models.StoreItem.id == adjustment_data.item_id,
+            store_models.StoreItem.business_id == effective_business_id,
         )
-        .order_by(store_models.StoreStockEntry.purchase_date.desc())
         .first()
     )
 
-    if not latest_entry:
-        raise HTTPException(status_code=404, detail="Item out of stock")
+    if not item_obj:
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found"
+        )
 
-    if adjustment_data.quantity_adjusted > latest_entry.quantity:
-        raise HTTPException(status_code=400, detail="Adjustment exceeds available stock")
+    qty = float(adjustment_data.quantity_adjusted)
 
-    # ------------------------------
-    # Deduct quantity
-    # ------------------------------
-    latest_entry.quantity -= adjustment_data.quantity_adjusted
-    db.add(latest_entry)
+    if qty == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Adjustment cannot be zero."
+        )
 
-    # ------------------------------
-    # Log adjustment
-    # ------------------------------
+    # ----------------------------------------------------
+    # POSITIVE = REMOVE STOCK
+    # ----------------------------------------------------
+    if qty > 0:
+
+        available = calculate_available_stock(
+            db=db,
+            business_id=effective_business_id,
+            item_id=adjustment_data.item_id,
+        )
+
+        if qty > available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {available} available."
+            )
+
+        deduct_fifo_stock(
+            db=db,
+            business_id=effective_business_id,
+            item_id=adjustment_data.item_id,
+            quantity=qty,
+        )
+
+    # ----------------------------------------------------
+    # NEGATIVE = ADD STOCK
+    # ----------------------------------------------------
+    else:
+
+        # Do nothing here.
+        # Stock additions are represented ONLY by the
+        # adjustment record.
+        pass
+
+    # ----------------------------------------------------
+    # Update opening inventory timestamp (if record exists)
+    # ----------------------------------------------------
+    inventory = (
+        db.query(store_models.StoreInventory)
+        .filter(
+            store_models.StoreInventory.item_id == adjustment_data.item_id,
+            store_models.StoreInventory.business_id == effective_business_id,
+        )
+        .first()
+    )
+
+    if inventory:
+        inventory.last_updated = now_wat()
+        db.add(inventory)
+
+    # ----------------------------------------------------
+    # Log Adjustment
+    # ----------------------------------------------------
+    # ----------------------------------------------------
+    # Log Adjustment
+    # ----------------------------------------------------
     adjustment = store_models.StoreInventoryAdjustment(
         business_id=effective_business_id,
         item_id=adjustment_data.item_id,
-        quantity_adjusted=adjustment_data.quantity_adjusted,
+        quantity_adjusted=qty,
+
+        # Positive adjustment removes stock immediately,
+        # so nothing remains.
+        # Negative adjustment adds stock, so its remaining
+        # quantity becomes available for future FIFO issues.
+        remaining_quantity=abs(qty) if qty < 0 else 0,
+
         reason=adjustment_data.reason,
         adjusted_by=current_user.username,
-        adjusted_at=now_wat()
+        adjusted_at=now_wat(),
     )
 
     db.add(adjustment)
+
     db.commit()
     db.refresh(adjustment)
 
-    # ------------------------------
-    # Category display
-    # ------------------------------
+    # ----------------------------------------------------
+    # Response
+    # ----------------------------------------------------
     category_display = None
+
     if item_obj.category:
         category_display = store_schemas.StoreCategoryDisplay(
             id=item_obj.category.id,
             name=item_obj.category.name,
             category_name=item_obj.category.name or "Unknown",
-            created_at=item_obj.category.created_at
+            created_at=item_obj.category.created_at,
         )
 
     item_display = store_schemas.StoreItemDisplay(
@@ -2742,7 +2783,7 @@ def adjust_store_inventory(
         category=category_display,
         unit_price=item_obj.unit_price,
         selling_price=item_obj.selling_price,
-        created_at=item_obj.created_at
+        created_at=item_obj.created_at,
     )
 
     return store_schemas.StoreInventoryAdjustmentDisplay(
@@ -2751,7 +2792,7 @@ def adjust_store_inventory(
         quantity_adjusted=adjustment.quantity_adjusted,
         reason=adjustment.reason,
         adjusted_by=adjustment.adjusted_by,
-        adjusted_at=adjustment.adjusted_at
+        adjusted_at=adjustment.adjusted_at,
     )
 
 

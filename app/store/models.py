@@ -153,16 +153,32 @@ class StoreInventoryAdjustment(Base, BusinessMixin):
     __tablename__ = "store_inventory_adjustments"
 
     id = Column(Integer, primary_key=True, index=True)
-    item_id = Column(Integer, ForeignKey("store_items.id"), nullable=False)
-    quantity_adjusted = Column(Integer, nullable=False)
-    reason = Column(String, nullable=False)
-    adjusted_by = Column(String, nullable=False)
-    adjusted_at = Column(DateTime(timezone=True), default=get_local_time)
 
-   
+    item_id = Column(
+        Integer,
+        ForeignKey("store_items.id"),
+        nullable=False
+    )
+
+    # Original adjustment entered by the user.
+    # Positive = Remove stock
+    # Negative = Add stock
+    quantity_adjusted = Column(Integer, nullable=False)
+
+    # Remaining quantity available from this adjustment.
+    # Used by FIFO when stock was added through an adjustment.
+    remaining_quantity = Column(Integer, default=0, nullable=False)
+
+    reason = Column(String, nullable=False)
+
+    adjusted_by = Column(String, nullable=False)
+
+    adjusted_at = Column(
+        DateTime(timezone=True),
+        default=get_local_time
+    )
 
     item = relationship("StoreItem")
-
 
 # ----------------------------
 # 6. Store Inventory
