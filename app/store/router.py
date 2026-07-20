@@ -22,6 +22,7 @@ from app.store.inventory_service import (
     rebuild_everything,
     calculate_available_stock,
     deduct_fifo_stock,
+    restore_fifo_stock,
 )
 
 from app.store.schemas import IssueCreate, IssueDisplay
@@ -1271,105 +1272,11 @@ def issue_kitchen(
                 detail=f"Item {item_data.item_id} not found"
             )
 
-        # =====================================================
-        # REAL AVAILABLE STOCK
-        # Opening + Purchases - Issues - Adjustments
-        # =====================================================
-
-        inventory = (
-            db.query(store_models.StoreInventory)
-            .filter(
-                store_models.StoreInventory.item_id == item_data.item_id,
-                store_models.StoreInventory.business_id == business_id
-            )
-            .first()
-        )
-
-        opening_stock = float(
-            inventory.opening_quantity if inventory else 0
-        )
-
-        purchased_stock = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        store_models.StoreStockEntry.original_quantity
-                    ),
-                    0
-                )
-            )
-            .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.business_id == business_id
-            )
-            .scalar()
-            or 0
-        )
-
-        adjustments = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        store_models.StoreInventoryAdjustment.quantity_adjusted
-                    ),
-                    0
-                )
-            )
-            .filter(
-                store_models.StoreInventoryAdjustment.item_id == item_data.item_id,
-                store_models.StoreInventoryAdjustment.business_id == business_id
-            )
-            .scalar()
-            or 0
-        )
-
-        previous_issues = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        store_models.StoreIssueItem.quantity
-                    ),
-                    0
-                )
-            )
-            .join(store_models.StoreIssue)
-            .filter(
-                store_models.StoreIssueItem.item_id == item_data.item_id,
-                store_models.StoreIssue.business_id == business_id
-            )
-            .scalar()
-            or 0
-        )
-
-        restaurant_consumption = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        restaurant_models.MealOrderItem.store_qty_used
-                    ),
-                    0
-                )
-            )
-            .join(
-                restaurant_models.MealOrder,
-                restaurant_models.MealOrder.id
-                == restaurant_models.MealOrderItem.order_id
-            )
-            .filter(
-                restaurant_models.MealOrderItem.store_item_id == item_data.item_id,
-                restaurant_models.MealOrder.status == "closed",
-                restaurant_models.MealOrder.business_id == business_id
-            )
-            .scalar()
-            or 0
-        )
-
-        available_stock = (
-            opening_stock
-            + purchased_stock
-            - previous_issues
-            - restaurant_consumption
-            - adjustments
+        
+        available_stock = calculate_available_stock(
+            db=db,
+            business_id=business_id,
+            item_id=item_data.item_id,
         )
 
         if available_stock < item_data.quantity:
@@ -1395,35 +1302,12 @@ def issue_kitchen(
         db.add(issue_item)
         db.flush()
 
-        # ----------------------------
-        # FIFO Deduction
-        # ----------------------------
-        remaining = item_data.quantity
-
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.quantity > 0,
-                store_models.StoreStockEntry.business_id == business_id,
-            )
-            .order_by(
-                store_models.StoreStockEntry.purchase_date.asc()
-            )
-            .all()
+        deduct_fifo_stock(
+            db=db,
+            business_id=business_id,
+            item_id=item_data.item_id,
+            quantity=item_data.quantity,
         )
-
-        for entry in stock_entries:
-
-            if remaining <= 0:
-                break
-
-            if entry.quantity >= remaining:
-                entry.quantity -= remaining
-                remaining = 0
-            else:
-                remaining -= entry.quantity
-                entry.quantity = 0
 
         # ----------------------------
         # Update Kitchen Inventory
@@ -1567,181 +1451,215 @@ def now_wat() -> datetime:
 def update_kitchen_issue(
     issue_id: int,
     issue_data: IssueToKitchenCreate,
-    business_id: Optional[int] = Query(None, description="Super admin can specify business"),
+    business_id: Optional[int] = Query(
+        None,
+        description="Super admin can specify business"
+    ),
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["store", "admin"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["store", "admin"])
+    )
 ):
-    # ----------------------------
-    # Resolve business/tenant
-    # ----------------------------
-    if "super_admin" in current_user.roles:
-        effective_business_id = business_id
-        if not effective_business_id:
-            raise HTTPException(status_code=400, detail="Super admin must provide business_id.")
-    else:
-        effective_business_id = current_user.business_id
 
-    # ----------------------------
-    # Fetch existing kitchen issue
-    # ----------------------------
+    # ----------------------------------------------------
+    # Resolve Business
+    # ----------------------------------------------------
+    business_id = resolve_business_id(
+        current_user,
+        business_id
+    )
+
+    # ----------------------------------------------------
+    # Existing Issue
+    # ----------------------------------------------------
     issue = (
         db.query(store_models.StoreIssue)
-        .filter_by(id=issue_id, issue_to="kitchen", business_id=effective_business_id)
+        .filter(
+            store_models.StoreIssue.id == issue_id,
+            store_models.StoreIssue.issue_to == "kitchen",
+            store_models.StoreIssue.business_id == business_id,
+        )
         .first()
     )
+
     if not issue:
-        raise HTTPException(status_code=404, detail="Kitchen issue not found")
-
-    # ----------------------------
-    # Reverse old stock and kitchen inventory
-    # ----------------------------
-    for old_item in issue.issue_items:
-        # Restore store stock (FIFO reverse)
-        remaining = old_item.quantity
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == old_item.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
-            .all()
+        raise HTTPException(
+            status_code=404,
+            detail="Kitchen issue not found"
         )
-        for entry in stock_entries:
-            entry.quantity += remaining
-            remaining = 0
-            if remaining <= 0:
-                break
 
-        # Reduce kitchen inventory
-        kitchen_inv = (
+    # ----------------------------------------------------
+    # Kitchen
+    # ----------------------------------------------------
+    kitchen = (
+        db.query(kitchen_models.Kitchen)
+        .filter(
+            kitchen_models.Kitchen.id == issue_data.kitchen_id,
+            kitchen_models.Kitchen.business_id == business_id,
+        )
+        .first()
+    )
+
+    if not kitchen:
+        raise HTTPException(
+            status_code=404,
+            detail="Kitchen not found"
+        )
+
+    # ----------------------------------------------------
+    # Reverse Previous Issue
+    # ----------------------------------------------------
+    for old_item in issue.issue_items:
+
+        restore_fifo_stock(
+            db=db,
+            business_id=business_id,
+            item_id=old_item.item_id,
+            quantity=old_item.quantity,
+        )
+
+        kitchen_inventory = (
             db.query(kitchen_models.KitchenInventory)
             .filter(
+                kitchen_models.KitchenInventory.business_id == business_id,
                 kitchen_models.KitchenInventory.kitchen_id == issue.kitchen_id,
                 kitchen_models.KitchenInventory.item_id == old_item.item_id,
-                kitchen_models.KitchenInventory.business_id == effective_business_id
             )
             .first()
         )
-        if kitchen_inv:
-            kitchen_inv.quantity -= old_item.quantity
+
+        if kitchen_inventory:
+
+            kitchen_inventory.quantity -= old_item.quantity
+
+            if kitchen_inventory.quantity < 0:
+                kitchen_inventory.quantity = 0
 
         db.delete(old_item)
 
     db.flush()
 
-    # ----------------------------
-    # Update issue info
-    # ----------------------------
-    issue.issue_date = issue_data.issue_date or datetime.now(timezone.utc)
-    if issue.issue_date.tzinfo is None:
-        issue.issue_date = issue.issue_date.replace(tzinfo=timezone.utc)
-
+    # ----------------------------------------------------
+    # Update Header
+    # ----------------------------------------------------
     issue.kitchen_id = issue_data.kitchen_id
 
-    # ----------------------------
-    # Recreate issue items and adjust stock
-    # ----------------------------
-    issue_items_display: List[IssueToKitchenItemDisplay] = []
+    issue_date = issue_data.issue_date or now_utc()
 
+    if issue_date.tzinfo is None:
+        issue_date = issue_date.replace(tzinfo=timezone.utc)
+
+    issue.issue_date = issue_date
+
+    issue_items_display = []
+
+    # ----------------------------------------------------
+    # New Items
+    # ----------------------------------------------------
     for item_data in issue_data.issue_items:
-        # Validate item belongs to business
-        item_obj = db.query(store_models.StoreItem).filter_by(
-            id=item_data.item_id, business_id=effective_business_id
-        ).first()
-        if not item_obj:
-            raise HTTPException(status_code=404, detail=f"Item {item_data.item_id} not found")
 
-        # Check stock
-        total_available_stock = (
-            db.query(func.sum(store_models.StoreStockEntry.quantity))
+        item_obj = (
+            db.query(store_models.StoreItem)
             .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .scalar() or 0
-        )
-        if total_available_stock < item_data.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Not enough inventory for item {item_obj.name}"
-            )
-
-        # Create new StoreIssueItem
-        new_item = store_models.StoreIssueItem(
-            issue_id=issue.id,
-            item_id=item_data.item_id,
-            quantity=item_data.quantity,
-            business_id=effective_business_id
-        )
-        db.add(new_item)
-
-        # Deduct stock FIFO
-        remaining = item_data.quantity
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
-            .filter(
-                store_models.StoreStockEntry.item_id == item_data.item_id,
-                store_models.StoreStockEntry.quantity > 0,
-                store_models.StoreStockEntry.business_id == effective_business_id
-            )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
-            .all()
-        )
-        for entry in stock_entries:
-            if remaining <= 0:
-                break
-            if entry.quantity >= remaining:
-                entry.quantity -= remaining
-                remaining = 0
-            else:
-                remaining -= entry.quantity
-                entry.quantity = 0
-
-        # Update kitchen inventory
-        kitchen_inv = (
-            db.query(kitchen_models.KitchenInventory)
-            .filter(
-                kitchen_models.KitchenInventory.kitchen_id == issue.kitchen_id,
-                kitchen_models.KitchenInventory.item_id == item_data.item_id,
-                kitchen_models.KitchenInventory.business_id == effective_business_id
+                store_models.StoreItem.id == item_data.item_id,
+                store_models.StoreItem.business_id == business_id,
             )
             .first()
         )
-        if kitchen_inv:
-            kitchen_inv.quantity += item_data.quantity
+
+        if not item_obj:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Item {item_data.item_id} not found"
+            )
+
+        available = calculate_available_stock(
+            db=db,
+            business_id=business_id,
+            item_id=item_data.item_id,
+        )
+
+        if available < item_data.quantity:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Not enough inventory for "
+                    f"{item_obj.name}. "
+                    f"Available: {available}"
+                )
+            )
+
+        issue_item = store_models.StoreIssueItem(
+            issue_id=issue.id,
+            item_id=item_data.item_id,
+            quantity=item_data.quantity,
+            business_id=business_id,
+        )
+
+        db.add(issue_item)
+        db.flush()
+
+        deduct_fifo_stock(
+            db=db,
+            business_id=business_id,
+            item_id=item_data.item_id,
+            quantity=item_data.quantity,
+        )
+
+        kitchen_inventory = (
+            db.query(kitchen_models.KitchenInventory)
+            .filter(
+                kitchen_models.KitchenInventory.business_id == business_id,
+                kitchen_models.KitchenInventory.kitchen_id == issue.kitchen_id,
+                kitchen_models.KitchenInventory.item_id == item_data.item_id,
+            )
+            .first()
+        )
+
+        if kitchen_inventory:
+
+            kitchen_inventory.quantity += item_data.quantity
+
         else:
-            kitchen_inv = kitchen_models.KitchenInventory(
-                business_id=effective_business_id,
+
+            kitchen_inventory = kitchen_models.KitchenInventory(
+                business_id=business_id,
                 kitchen_id=issue.kitchen_id,
                 item_id=item_data.item_id,
-                quantity=item_data.quantity
+                quantity=item_data.quantity,
             )
-            db.add(kitchen_inv)
 
-        # Prepare display response
+            db.add(kitchen_inventory)
+
         issue_items_display.append(
             IssueToKitchenItemDisplay(
-                item=KitchenItemMinimalDisplay(id=item_obj.id, name=item_obj.name),
-                quantity=item_data.quantity
+                item=KitchenItemMinimalDisplay(
+                    id=item_obj.id,
+                    name=item_obj.name,
+                ),
+                quantity=item_data.quantity,
             )
         )
 
     db.commit()
     db.refresh(issue)
 
-    # Fetch kitchen display info
-    kitchen_obj = db.query(kitchen_models.Kitchen).filter_by(id=issue.kitchen_id).first()
-    kitchen_display = KitchenDisplaySimple(id=kitchen_obj.id, name=kitchen_obj.name)
-
-    # Convert issue_date to WAT for response
-    issue_date_wat = issue.issue_date.astimezone(WAT)
+    issue_date_wat = (
+        issue.issue_date.astimezone(WAT)
+        if issue.issue_date.tzinfo
+        else issue.issue_date.replace(
+            tzinfo=timezone.utc
+        ).astimezone(WAT)
+    )
 
     return IssueToKitchenDisplay(
         id=issue.id,
-        kitchen=kitchen_display,
+        kitchen=KitchenDisplaySimple(
+            id=kitchen.id,
+            name=kitchen.name,
+        ),
         issue_items=issue_items_display,
-        issue_date=issue_date_wat.isoformat()
+        issue_date=issue_date_wat.isoformat(),
     )
 
 
@@ -1862,81 +1780,191 @@ def delete_kitchen_issue(
     )
 ):
     try:
-        # ------------------------------
-        # 1️⃣ Resolve business (STANDARD)
-        # ------------------------------
-        business_id = resolve_business_id(current_user, business_id)
 
-        # ------------------------------
-        # 2️⃣ Fetch issue (tenant-safe)
-        # ------------------------------
+        # ----------------------------------------
+        # Resolve Business
+        # ----------------------------------------
+        business_id = resolve_business_id(
+            current_user,
+            business_id
+        )
+
+        # ----------------------------------------
+        # Find Issue
+        # ----------------------------------------
         issue = (
             db.query(store_models.StoreIssue)
             .filter(
                 store_models.StoreIssue.id == issue_id,
                 store_models.StoreIssue.issue_to == "kitchen",
-                store_models.StoreIssue.business_id == business_id
+                store_models.StoreIssue.business_id == business_id,
             )
             .first()
         )
 
         if not issue:
-            raise HTTPException(status_code=404, detail="Kitchen issue not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Kitchen issue not found"
+            )
 
-        # ------------------------------
-        # 3️⃣ Restore stock + kitchen inventory
-        # ------------------------------
+        # ----------------------------------------
+        # Restore Store Stock
+        # ----------------------------------------
         for item in issue.issue_items:
 
-            # Restore stock (FIFO)
             remaining = item.quantity
 
-            stock_entries = (
+            # ==========================================
+            # 1. Restore Purchase Stock
+            # ==========================================
+            purchases = (
                 db.query(store_models.StoreStockEntry)
                 .filter(
+                    store_models.StoreStockEntry.business_id == business_id,
                     store_models.StoreStockEntry.item_id == item.item_id,
-                    store_models.StoreStockEntry.business_id == business_id
                 )
-                .order_by(store_models.StoreStockEntry.purchase_date.asc())
+                .order_by(
+                    store_models.StoreStockEntry.purchase_date.asc(),
+                    store_models.StoreStockEntry.id.asc(),
+                )
                 .all()
             )
 
-            for entry in stock_entries:
-                entry.quantity += remaining
-                remaining = 0
+            for purchase in purchases:
+
                 if remaining <= 0:
                     break
 
-            # Reduce kitchen inventory (tenant-safe)
-            kitchen_inv = (
+                used = purchase.original_quantity - purchase.quantity
+
+                if used <= 0:
+                    continue
+
+                restore = min(used, remaining)
+
+                purchase.quantity += restore
+                remaining -= restore
+
+            # ==========================================
+            # 2. Restore Opening Stock
+            # ==========================================
+            if remaining > 0:
+
+                inventories = (
+                    db.query(store_models.StoreInventory)
+                    .filter(
+                        store_models.StoreInventory.business_id == business_id,
+                        store_models.StoreInventory.item_id == item.item_id,
+                    )
+                    .order_by(store_models.StoreInventory.id.asc())
+                    .all()
+                )
+
+                for inventory in inventories:
+
+                    if remaining <= 0:
+                        break
+
+                    used = inventory.opening_quantity - inventory.quantity
+
+                    if used <= 0:
+                        continue
+
+                    restore = min(used, remaining)
+
+                    inventory.quantity += restore
+                    remaining -= restore
+
+            # ==========================================
+            # 3. Restore Adjustment Stock
+            # ==========================================
+            if remaining > 0:
+
+                adjustments = (
+                    db.query(store_models.StoreInventoryAdjustment)
+                    .filter(
+                        store_models.StoreInventoryAdjustment.business_id == business_id,
+                        store_models.StoreInventoryAdjustment.item_id == item.item_id,
+                        store_models.StoreInventoryAdjustment.quantity_adjusted < 0,
+                    )
+                    .order_by(
+                        store_models.StoreInventoryAdjustment.adjusted_at.asc(),
+                        store_models.StoreInventoryAdjustment.id.asc(),
+                    )
+                    .all()
+                )
+
+                for adjustment in adjustments:
+
+                    if remaining <= 0:
+                        break
+
+                    added = abs(adjustment.quantity_adjusted)
+
+                    available_to_restore = (
+                        added - adjustment.remaining_quantity
+                    )
+
+                    if available_to_restore <= 0:
+                        continue
+
+                    restore = min(
+                        available_to_restore,
+                        remaining
+                    )
+
+                    adjustment.remaining_quantity += restore
+                    remaining -= restore
+
+            # ==========================================
+            # 4. Reduce Kitchen Inventory
+            # ==========================================
+            kitchen_inventory = (
                 db.query(kitchen_models.KitchenInventory)
                 .filter(
+                    kitchen_models.KitchenInventory.business_id == business_id,
                     kitchen_models.KitchenInventory.kitchen_id == issue.kitchen_id,
                     kitchen_models.KitchenInventory.item_id == item.item_id,
-                    kitchen_models.KitchenInventory.business_id == business_id
                 )
                 .first()
             )
 
-            if kitchen_inv:
-                kitchen_inv.quantity -= item.quantity
+            if kitchen_inventory:
 
+                kitchen_inventory.quantity -= item.quantity
+
+                if kitchen_inventory.quantity < 0:
+                    kitchen_inventory.quantity = 0
+
+            # ==========================================
+            # Delete Issue Item
+            # ==========================================
             db.delete(item)
 
-        # ------------------------------
-        # 4️⃣ Delete issue
-        # ------------------------------
+        # ----------------------------------------
+        # Delete Issue
+        # ----------------------------------------
         db.delete(issue)
+
         db.commit()
 
-        return {"detail": "Kitchen issue deleted successfully"}
+        return {
+            "message": "Kitchen issue deleted successfully.",
+            "issue_id": issue_id,
+            "business_id": business_id,
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
 
     except Exception as e:
+        db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete kitchen issue: {str(e)}"
         )
-
 
 
 # ----------------------------
@@ -2576,43 +2604,143 @@ def delete_bar_issue(
     # ----------------------------
     for item in issue.issue_items:
 
-        stock_entries = (
-            db.query(store_models.StoreStockEntry)
+        remaining_to_restore = float(item.quantity)
+
+        # --------------------------------------------------
+        # 1. Restore Opening Stock
+        # --------------------------------------------------
+        inventories = (
+            db.query(store_models.StoreInventory)
             .filter(
-                store_models.StoreStockEntry.item_id == item.item_id,
-                store_models.StoreStockEntry.business_id == effective_business_id
+                store_models.StoreInventory.item_id == item.item_id,
+                store_models.StoreInventory.business_id == effective_business_id,
             )
-            .order_by(store_models.StoreStockEntry.purchase_date.asc())
+            .order_by(store_models.StoreInventory.id.desc())
             .all()
         )
 
-        remaining_to_restore = item.quantity
+        for inventory in inventories:
 
-        for stock_entry in stock_entries:
             if remaining_to_restore <= 0:
                 break
 
-            stock_entry.quantity += remaining_to_restore
-            remaining_to_restore = 0
+            available_space = (
+                inventory.opening_quantity - inventory.quantity
+            )
 
-        # ----------------------------
-        # Reduce bar inventory
-        # ----------------------------
+            if available_space <= 0:
+                continue
+
+            restore = min(
+                available_space,
+                remaining_to_restore
+            )
+
+            inventory.quantity += restore
+            remaining_to_restore -= restore
+
+            db.add(inventory)
+
+        # --------------------------------------------------
+        # 2. Restore Adjustment Stock
+        # --------------------------------------------------
+        adjustments = (
+            db.query(store_models.StoreInventoryAdjustment)
+            .filter(
+                store_models.StoreInventoryAdjustment.item_id == item.item_id,
+                store_models.StoreInventoryAdjustment.business_id == effective_business_id,
+                store_models.StoreInventoryAdjustment.quantity_adjusted < 0,
+            )
+            .order_by(
+                store_models.StoreInventoryAdjustment.adjusted_at.desc(),
+                store_models.StoreInventoryAdjustment.id.desc(),
+            )
+            .all()
+        )
+
+        for adjustment in adjustments:
+
+            if remaining_to_restore <= 0:
+                break
+
+            original = abs(adjustment.quantity_adjusted)
+
+            available_space = (
+                original - adjustment.remaining_quantity
+            )
+
+            if available_space <= 0:
+                continue
+
+            restore = min(
+                available_space,
+                remaining_to_restore
+            )
+
+            adjustment.remaining_quantity += restore
+            remaining_to_restore -= restore
+
+            db.add(adjustment)
+
+        # --------------------------------------------------
+        # 3. Restore Purchase Stock
+        # --------------------------------------------------
+        purchases = (
+            db.query(store_models.StoreStockEntry)
+            .filter(
+                store_models.StoreStockEntry.item_id == item.item_id,
+                store_models.StoreStockEntry.business_id == effective_business_id,
+            )
+            .order_by(
+                store_models.StoreStockEntry.purchase_date.desc(),
+                store_models.StoreStockEntry.id.desc(),
+            )
+            .all()
+        )
+
+        for purchase in purchases:
+
+            if remaining_to_restore <= 0:
+                break
+
+            available_space = (
+                purchase.original_quantity - purchase.quantity
+            )
+
+            if available_space <= 0:
+                continue
+
+            restore = min(
+                available_space,
+                remaining_to_restore
+            )
+
+            purchase.quantity += restore
+            remaining_to_restore -= restore
+
+            db.add(purchase)
+
+        # --------------------------------------------------
+        # Reduce Bar Inventory
+        # --------------------------------------------------
         bar_inventory = (
             db.query(bar_models.BarInventory)
             .filter(
                 bar_models.BarInventory.bar_id == issue.bar_id,
                 bar_models.BarInventory.item_id == item.item_id,
-                bar_models.BarInventory.business_id == effective_business_id
+                bar_models.BarInventory.business_id == effective_business_id,
             )
             .first()
         )
 
         if bar_inventory:
+
             bar_inventory.quantity -= item.quantity
 
             if bar_inventory.quantity < 0:
                 bar_inventory.quantity = 0
+
+            db.add(bar_inventory)
 
     # ----------------------------
     # 4️⃣ Delete issue items
@@ -2904,117 +3032,168 @@ def list_store_inventory_adjustments(
 def update_adjustment(
     adjustment_id: int,
     data: StoreInventoryAdjustmentCreate,
-    business_id: Optional[int] = Query(None, description="Super admin can specify business"),
+    business_id: Optional[int] = Query(
+        None,
+        description="Super admin can specify business"
+    ),
     db: Session = Depends(get_db),
-    current_user: user_schemas.UserDisplaySchema = Depends(role_required(["admin","super_admin"]))
+    current_user: user_schemas.UserDisplaySchema = Depends(
+        role_required(["admin", "super_admin"])
+    )
 ):
 
-    roles = [r.lower() for r in current_user.roles]
+    # ----------------------------------------------------
+    # Resolve Business
+    # ----------------------------------------------------
+    business_id = resolve_business_id(
+        current_user,
+        business_id
+    )
 
-    # ------------------------------
-    # Resolve business
-    # ------------------------------
-    if "super_admin" in roles:
-        effective_business_id = business_id if business_id else current_user.business_id
-    else:
-        effective_business_id = current_user.business_id
-
-    # ------------------------------
-    # Load adjustment
-    # ------------------------------
-    adjustment = db.query(StoreInventoryAdjustment).filter(
-        StoreInventoryAdjustment.id == adjustment_id,
-        StoreInventoryAdjustment.business_id == effective_business_id
-    ).first()
+    # ----------------------------------------------------
+    # Load Existing Adjustment
+    # ----------------------------------------------------
+    adjustment = (
+        db.query(StoreInventoryAdjustment)
+        .filter(
+            StoreInventoryAdjustment.id == adjustment_id,
+            StoreInventoryAdjustment.business_id == business_id,
+        )
+        .first()
+    )
 
     if not adjustment:
-        raise HTTPException(status_code=404, detail="Adjustment not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Adjustment not found."
+        )
 
-    # ------------------------------
-    # Helper: latest stock entry
-    # ------------------------------
-    def latest_entry_for(item_id: int):
-        return db.query(StoreStockEntry).filter(
-            StoreStockEntry.item_id == item_id,
-            StoreStockEntry.business_id == effective_business_id
-        ).order_by(StoreStockEntry.purchase_date.desc()).first()
+    # ----------------------------------------------------
+    # Validate Item
+    # ----------------------------------------------------
+    item = (
+        db.query(StoreItem)
+        .filter(
+            StoreItem.id == data.item_id,
+            StoreItem.business_id == business_id,
+        )
+        .first()
+    )
 
-    # ------------------------------
-    # CASE A: Same item
-    # ------------------------------
-    if data.item_id == adjustment.item_id:
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found."
+        )
 
-        entry = latest_entry_for(adjustment.item_id)
+    # ====================================================
+    # STEP 1
+    # Undo old adjustment
+    # ====================================================
 
-        if not entry:
-            raise HTTPException(status_code=404, detail="Stock entry not found")
+    if adjustment.quantity_adjusted > 0:
 
-        old_qty = adjustment.quantity_adjusted
-        new_qty = data.quantity_adjusted
+        # Old adjustment removed stock.
+        restore_fifo_stock(
+            db=db,
+            business_id=business_id,
+            item_id=adjustment.item_id,
+            quantity=adjustment.quantity_adjusted,
+        )
 
-        delta = new_qty - old_qty
+    else:
 
-        if delta > 0:
-            if entry.quantity < delta:
-                raise HTTPException(status_code=400, detail="Adjustment exceeds available stock")
-            entry.quantity -= delta
+        # Old adjustment added stock.
+        original_added = abs(adjustment.quantity_adjusted)
 
-        elif delta < 0:
-            entry.quantity += abs(delta)
+        if adjustment.remaining_quantity < original_added:
 
-        adjustment.quantity_adjusted = new_qty
-        adjustment.reason = data.reason
+            used = original_added - adjustment.remaining_quantity
 
-        db.add(entry)
-        db.add(adjustment)
-        db.commit()
-        db.refresh(adjustment)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot edit adjustment. "
+                    f"{used} has already been issued."
+                )
+            )
 
-        return {
-            "message": "Adjustment updated successfully",
-            "adjustment_id": adjustment.id,
-            "current_stock": entry.quantity
-        }
+    # ====================================================
+    # STEP 2
+    # Apply new adjustment
+    # ====================================================
 
-    # ------------------------------
-    # CASE B: Item changed
-    # ------------------------------
+    qty = float(data.quantity_adjusted)
 
-    old_entry = latest_entry_for(adjustment.item_id)
+    if qty == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Adjustment cannot be zero."
+        )
 
-    if not old_entry:
-        raise HTTPException(status_code=404, detail="Old stock entry not found")
+    if qty > 0:
 
-    # restore old item
-    old_entry.quantity += adjustment.quantity_adjusted
+        available = calculate_available_stock(
+            db=db,
+            business_id=business_id,
+            item_id=data.item_id,
+        )
 
-    new_entry = latest_entry_for(data.item_id)
+        if qty > available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {available} available."
+            )
 
-    if not new_entry:
-        raise HTTPException(status_code=404, detail="New stock entry not found")
+        deduct_fifo_stock(
+            db=db,
+            business_id=business_id,
+            item_id=data.item_id,
+            quantity=qty,
+        )
 
-    if new_entry.quantity < data.quantity_adjusted:
-        raise HTTPException(status_code=400, detail="Adjustment exceeds stock for new item")
+        adjustment.remaining_quantity = 0
 
-    new_entry.quantity -= data.quantity_adjusted
+    else:
 
+        adjustment.remaining_quantity = abs(qty)
+
+    # ----------------------------------------------------
+    # Save Adjustment
+    # ----------------------------------------------------
     adjustment.item_id = data.item_id
-    adjustment.quantity_adjusted = data.quantity_adjusted
+    adjustment.quantity_adjusted = qty
     adjustment.reason = data.reason
+    adjustment.adjusted_at = now_wat()
 
-    db.add(old_entry)
-    db.add(new_entry)
     db.add(adjustment)
+
+    # ----------------------------------------------------
+    # Update Inventory Timestamp
+    # ----------------------------------------------------
+    inventory = (
+        db.query(store_models.StoreInventory)
+        .filter(
+            store_models.StoreInventory.item_id == data.item_id,
+            store_models.StoreInventory.business_id == business_id,
+        )
+        .first()
+    )
+
+    if inventory:
+        inventory.last_updated = now_wat()
+        db.add(inventory)
 
     db.commit()
     db.refresh(adjustment)
 
     return {
-        "message": "Adjustment updated successfully (item changed)",
+        "message": "Adjustment updated successfully.",
         "adjustment_id": adjustment.id,
-        "old_item_stock": old_entry.quantity,
-        "new_item_stock": new_entry.quantity
+        "item_id": adjustment.item_id,
+        "quantity_adjusted": adjustment.quantity_adjusted,
     }
+
 
 
 
@@ -3028,62 +3207,85 @@ def delete_adjustment(
     )
 ):
     try:
-        # ------------------------------
-        # 1️⃣ Resolve business (CLEAN ✅)
-        # ------------------------------
-        business_id = resolve_business_id(current_user, business_id)
 
-        # ------------------------------
-        # 2️⃣ Get adjustment (tenant-safe)
-        # ------------------------------
-        adjustment = db.query(StoreInventoryAdjustment).filter(
-            StoreInventoryAdjustment.id == adjustment_id,
-            StoreInventoryAdjustment.business_id == business_id
-        ).first()
+        # ---------------------------------------------------
+        # Resolve Business
+        # ---------------------------------------------------
+        business_id = resolve_business_id(
+            current_user,
+            business_id
+        )
+
+        # ---------------------------------------------------
+        # Find Adjustment
+        # ---------------------------------------------------
+        adjustment = (
+            db.query(StoreInventoryAdjustment)
+            .filter(
+                StoreInventoryAdjustment.id == adjustment_id,
+                StoreInventoryAdjustment.business_id == business_id,
+            )
+            .first()
+        )
 
         if not adjustment:
-            raise HTTPException(status_code=404, detail="Adjustment not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Adjustment not found"
+            )
 
-        # ------------------------------
-        # 3️⃣ Get latest stock entry
-        # ------------------------------
-        stock_entry = db.query(StoreStockEntry).filter(
-            StoreStockEntry.item_id == adjustment.item_id,
-            StoreStockEntry.business_id == business_id
-        ).order_by(StoreStockEntry.purchase_date.desc()).first()
+        # ---------------------------------------------------
+        # Negative Adjustment (Stock Added)
+        # ---------------------------------------------------
+        if adjustment.quantity_adjusted < 0:
 
-        if not stock_entry:
-            raise HTTPException(status_code=404, detail="Stock entry not found")
+            original_added = abs(adjustment.quantity_adjusted)
 
-        # ------------------------------
-        # 4️⃣ Restore stock
-        # ------------------------------
-        stock_entry.quantity += adjustment.quantity_adjusted
-        db.add(stock_entry)
+            # Some of the added stock has already been issued
+            if adjustment.remaining_quantity < original_added:
 
-        # ------------------------------
-        # 5️⃣ Delete adjustment
-        # ------------------------------
+                used = original_added - adjustment.remaining_quantity
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot delete adjustment. "
+                        f"{used} has already been issued."
+                    )
+                )
+
+        # ---------------------------------------------------
+        # Positive Adjustment (Stock Removed)
+        # ---------------------------------------------------
+        else:
+            # Nothing needs restoring.
+            # Stock was already deducted when adjustment was created.
+            pass
+
+        # ---------------------------------------------------
+        # Delete Adjustment
+        # ---------------------------------------------------
         db.delete(adjustment)
 
-        # ------------------------------
-        # 6️⃣ Commit transaction
-        # ------------------------------
         db.commit()
 
         return {
-            "message": "Adjustment deleted successfully",
+            "message": "Adjustment deleted successfully.",
             "item_id": adjustment.item_id,
-            "restored_quantity": adjustment.quantity_adjusted,
-            "current_stock": stock_entry.quantity
+            "quantity_adjusted": adjustment.quantity_adjusted
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
+
     except Exception as e:
-        db.rollback()  # ✅ VERY IMPORTANT for safety
+        db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete adjustment: {str(e)}"
         )
+
 
 
 

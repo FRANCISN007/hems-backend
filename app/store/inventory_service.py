@@ -139,6 +139,10 @@ def deduct_fifo_stock(
 
         db.add(purchase)
 
+
+
+
+
     # ---------------------------------------------------
     # 2. Deduct Adjustment Stock (FIFO)
     # ---------------------------------------------------
@@ -198,6 +202,9 @@ def deduct_fifo_stock(
 
             db.add(opening)
 
+
+    
+
     # ---------------------------------------------------
     # Safety Check
     # ---------------------------------------------------
@@ -208,7 +215,102 @@ def deduct_fifo_stock(
         )
 
         
+def restore_fifo_stock(
+    db: Session,
+    business_id: int,
+    item_id: int,
+    quantity: float,
+):
+    """
+    Restore stock in the reverse order:
+    1. Negative adjustments
+    2. Purchases
+    3. Opening stock
+    """
 
+    remaining = quantity
+
+    # -----------------------------------
+    # Restore adjustment stock
+    # -----------------------------------
+    adjustments = (
+        db.query(store_models.StoreInventoryAdjustment)
+        .filter(
+            store_models.StoreInventoryAdjustment.business_id == business_id,
+            store_models.StoreInventoryAdjustment.item_id == item_id,
+            store_models.StoreInventoryAdjustment.quantity_adjusted < 0,
+        )
+        .order_by(
+            store_models.StoreInventoryAdjustment.adjusted_at.asc(),
+            store_models.StoreInventoryAdjustment.id.asc(),
+        )
+        .all()
+    )
+
+    for adj in adjustments:
+
+        if remaining <= 0:
+            break
+
+        original_added = abs(adj.quantity_adjusted)
+
+        available_space = original_added - adj.remaining_quantity
+
+        if available_space <= 0:
+            continue
+
+        restore = min(available_space, remaining)
+
+        adj.remaining_quantity += restore
+        remaining -= restore
+
+    # -----------------------------------
+    # Restore purchase stock
+    # -----------------------------------
+    if remaining > 0:
+
+        purchases = (
+            db.query(store_models.StoreStockEntry)
+            .filter(
+                store_models.StoreStockEntry.business_id == business_id,
+                store_models.StoreStockEntry.item_id == item_id,
+            )
+            .order_by(
+                store_models.StoreStockEntry.purchase_date.asc(),
+                store_models.StoreStockEntry.id.asc(),
+            )
+            .all()
+        )
+
+        for purchase in purchases:
+
+            if remaining <= 0:
+                break
+
+            purchase.quantity += remaining
+            remaining = 0
+
+    # -----------------------------------
+    # Restore opening stock
+    # -----------------------------------
+    if remaining > 0:
+
+        inventories = (
+            db.query(store_models.StoreInventory)
+            .filter(
+                store_models.StoreInventory.business_id == business_id,
+                store_models.StoreInventory.item_id == item_id,
+            )
+            .all()
+        )
+
+        for inventory in inventories:
+
+            if remaining <= 0:
+                break
+
+            inventory.quantity += remaining
+            remaining = 0
 
 
 def increase_bar_inventory(
