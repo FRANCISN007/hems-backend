@@ -1452,9 +1452,14 @@ def get_bar_stock_balance(
         if bar_id:
             received_query = received_query.filter(store_models.StoreIssue.bar_id == bar_id)
         if start_date:
-            received_query = received_query.filter(store_models.StoreIssue.issue_date >= start_date)
+            received_query = received_query.filter(
+                store_models.StoreIssue.issue_date >= start_date
+            )
+
         if end_date:
-            received_query = received_query.filter(store_models.StoreIssue.issue_date <= end_date)
+            received_query = received_query.filter(
+                store_models.StoreIssue.issue_date < (end_date + timedelta(days=1))
+            )
 
         received_query = received_query.group_by(
             store_models.StoreIssueItem.item_id,
@@ -1465,6 +1470,9 @@ def get_bar_stock_balance(
             (row.item_id, row.bar_id): float(row.total_received or 0)
             for row in received_query.all()
         }
+
+    
+
 
         # =============================================================
         # 2️⃣ TOTAL SOLD (Bar Sales)
@@ -1487,9 +1495,14 @@ def get_bar_stock_balance(
         if bar_id:
             sold_query = sold_query.filter(bar_models.BarSale.bar_id == bar_id)
         if start_date:
-            sold_query = sold_query.filter(bar_models.BarSale.sale_date >= start_date)
+            sold_query = sold_query.filter(
+                bar_models.BarSale.sale_date >= start_date
+            )
+
         if end_date:
-            sold_query = sold_query.filter(bar_models.BarSale.sale_date <= end_date)
+            sold_query = sold_query.filter(
+                bar_models.BarSale.sale_date < (end_date + timedelta(days=1))
+            )
 
         sold_query = sold_query.group_by(
             bar_models.BarInventory.item_id,
@@ -1500,6 +1513,8 @@ def get_bar_stock_balance(
             (row.item_id, row.bar_id): float(row.total_sold or 0)
             for row in sold_query.all()
         }
+
+        
 
         # =============================================================
         # 3️⃣ TOTAL ADJUSTED (Inventory Adjustments)
@@ -1520,9 +1535,14 @@ def get_bar_stock_balance(
         if bar_id:
             adjusted_query = adjusted_query.filter(bar_models.BarInventoryAdjustment.bar_id == bar_id)
         if start_date:
-            adjusted_query = adjusted_query.filter(bar_models.BarInventoryAdjustment.adjusted_at >= start_date)
+            adjusted_query = adjusted_query.filter(
+                bar_models.BarInventoryAdjustment.adjusted_at >= start_date
+            )
+
         if end_date:
-            adjusted_query = adjusted_query.filter(bar_models.BarInventoryAdjustment.adjusted_at <= end_date)
+            adjusted_query = adjusted_query.filter(
+                bar_models.BarInventoryAdjustment.adjusted_at < (end_date + timedelta(days=1))
+            )
 
         adjusted_query = adjusted_query.group_by(
             bar_models.BarInventoryAdjustment.item_id,
@@ -1533,6 +1553,8 @@ def get_bar_stock_balance(
             (row.item_id, row.bar_id): float(row.total_adjusted or 0)
             for row in adjusted_query.all()
         }
+
+        
 
         # =============================================================
         # 4️⃣ MERGE + CALCULATE
@@ -1616,6 +1638,7 @@ def get_bar_stock_balance(
             status_code=500,
             detail=f"Failed to retrieve bar stock balance: {str(e)}"
         )
+
 
 
     
