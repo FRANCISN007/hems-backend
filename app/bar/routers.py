@@ -1644,6 +1644,11 @@ def get_bar_stock_balance(
     
 
 
+# -------------------------
+# Create Bar Adjustment
+# Positive = Remove Stock
+# Negative = Add Stock
+# -------------------------
 @router.post("/adjust", response_model=BarInventoryAdjustmentDisplay)
 def adjust_bar_inventory(
     adjustment_data: BarInventoryAdjustmentCreate,
@@ -1654,106 +1659,119 @@ def adjust_bar_inventory(
     )
 ):
     try:
+
         # ------------------------------
-        # 1️⃣ Resolve business
+        # Resolve business
         # ------------------------------
-        business_id = resolve_business_id(current_user, business_id)
+        business_id = resolve_business_id(
+            current_user,
+            business_id
+        )
 
         bar_id = adjustment_data.bar_id
         item_id = adjustment_data.item_id
 
         # ------------------------------
-        # 2️⃣ Validate bar (tenant-safe)
+        # Validate Bar
         # ------------------------------
-        bar = db.query(bar_models.Bar).filter(
-            bar_models.Bar.id == bar_id,
-            bar_models.Bar.business_id == business_id
-        ).first()
+        bar = (
+            db.query(bar_models.Bar)
+            .filter(
+                bar_models.Bar.id == bar_id,
+                bar_models.Bar.business_id == business_id,
+            )
+            .first()
+        )
 
         if not bar:
-            raise HTTPException(status_code=404, detail="Bar not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Bar not found"
+            )
 
         # ------------------------------
-        # 3️⃣ Validate item (tenant-safe)
+        # Validate Item
         # ------------------------------
-        item = db.query(store_models.StoreItem).filter(
-            store_models.StoreItem.id == item_id,
-            store_models.StoreItem.business_id == business_id
-        ).first()
+        item = (
+            db.query(store_models.StoreItem)
+            .filter(
+                store_models.StoreItem.id == item_id,
+                store_models.StoreItem.business_id == business_id,
+            )
+            .first()
+        )
 
         if not item or item.item_type != "bar":
-            raise HTTPException(status_code=404, detail="Bar item not found")
+            raise HTTPException(
+                status_code=404,
+                detail="Bar item not found"
+            )
 
         # ------------------------------
-        # 🔢 STEP 1: TOTAL ISSUED
+        # Get Current Bar Inventory
         # ------------------------------
-        issued = (
-            db.query(func.coalesce(func.sum(store_models.StoreIssueItem.quantity), 0))
-            .join(store_models.StoreIssue)
+        inventory = (
+            db.query(bar_models.BarInventory)
             .filter(
-                store_models.StoreIssue.bar_id == bar_id,
-                store_models.StoreIssue.issue_to == "bar",
-                store_models.StoreIssue.business_id == business_id,
-                store_models.StoreIssueItem.item_id == item_id
+                bar_models.BarInventory.bar_id == bar_id,
+                bar_models.BarInventory.item_id == item_id,
+                bar_models.BarInventory.business_id == business_id,
             )
-            .scalar()
+            .first()
         )
 
-        # ------------------------------
-        # 🔢 STEP 2: TOTAL SOLD
-        # ------------------------------
-        sold = (
-            db.query(func.coalesce(func.sum(bar_models.BarSaleItem.quantity), 0))
-            .join(bar_models.BarSaleItem.bar_inventory)
-            .join(bar_models.BarSaleItem.sale)
-            .filter(
-                bar_models.BarSale.bar_id == bar_id,
-                bar_models.BarSale.business_id == business_id,
-                bar_models.BarInventory.item_id == item_id
+        if not inventory:
+            raise HTTPException(
+                status_code=404,
+                detail="Item not found in bar inventory"
             )
-            .scalar()
-        )
 
-        # ------------------------------
-        # 🔢 STEP 3: TOTAL ADJUSTED
-        # ------------------------------
-        adjusted = (
-            db.query(func.coalesce(func.sum(bar_models.BarInventoryAdjustment.quantity_adjusted), 0))
-            .filter(
-                bar_models.BarInventoryAdjustment.bar_id == bar_id,
-                bar_models.BarInventoryAdjustment.item_id == item_id,
-                bar_models.BarInventoryAdjustment.business_id == business_id
-            )
-            .scalar()
-        )
+        qty = float(adjustment_data.quantity_adjusted)
 
-        # ------------------------------
-        # 🧮 STEP 4: COMPUTE BALANCE
-        # ------------------------------
-        balance = issued - sold - adjusted
-
-        # ------------------------------
-        # ❗ VALIDATION
-        # ------------------------------
-        if adjustment_data.quantity_adjusted > balance:
+        if qty == 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Adjustment exceeds available stock. Available: {balance}"
+                detail="Adjustment cannot be zero."
             )
 
         # ------------------------------
-        # 📦 STEP 5: SAVE ADJUSTMENT
+        # Positive = Remove Stock
+        # ------------------------------
+        if qty > 0:
+
+            if inventory.quantity < qty:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Only {inventory.quantity} available."
+                )
+
+            inventory.quantity -= qty
+
+        # ------------------------------
+        # Negative = Add Stock
+        # ------------------------------
+        else:
+
+            inventory.quantity += abs(qty)
+
+        # ------------------------------
+        # Save Adjustment
         # ------------------------------
         adjustment = bar_models.BarInventoryAdjustment(
+            business_id=business_id,
             bar_id=bar_id,
             item_id=item_id,
-            quantity_adjusted=adjustment_data.quantity_adjusted,
+            quantity_adjusted=qty,
             reason=adjustment_data.reason,
             adjusted_by=current_user.username,
-            business_id=business_id  # ✅ IMPORTANT FIX
+            adjusted_at=now_wat(),
         )
 
         db.add(adjustment)
+
+        # ------------------------------
+        # Commit
+        # ------------------------------
         db.commit()
         db.refresh(adjustment)
 
@@ -1762,6 +1780,7 @@ def adjust_bar_inventory(
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -1769,6 +1788,7 @@ def adjust_bar_inventory(
             detail=f"Adjustment failed: {str(e)}"
         )
 
+        
 
 
 @router.get("/adjustments", response_model=List[BarInventoryAdjustmentDisplay])

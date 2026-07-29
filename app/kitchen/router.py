@@ -114,7 +114,7 @@ def list_kitchens(
     ),
     db: Session = Depends(db_dependency),
     current_user: user_schemas.UserDisplaySchema = Depends(
-        role_required(["store", "admin", "super_admin"])
+        role_required(["store",  "admin", "super_admin"])
     )
 ):
     try:
@@ -372,17 +372,24 @@ def adjust_kitchen_inventory(
 
         # ------------------------------
         # 3️⃣ APPLY SIGN LOGIC
+        # Positive = Remove
+        # Negative = Add
         # ------------------------------
-        new_quantity = inventory.quantity + qty
 
-        # prevent negative stock
-        if new_quantity < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Insufficient stock for this adjustment"
-            )
+        if qty > 0:
+            # Remove stock
 
-        inventory.quantity = new_quantity
+            if inventory.quantity < qty:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Insufficient stock for this adjustment"
+                )
+
+            inventory.quantity -= qty
+
+        else:
+            # Add stock
+            inventory.quantity += abs(qty)
 
         # ------------------------------
         # 4️⃣ LOG ADJUSTMENT
@@ -425,12 +432,16 @@ def adjust_kitchen_inventory(
         # ------------------------------
         # 6️⃣ SIGN-BASED STOCK TRACKING
         # ------------------------------
-        if qty < 0:
-            # negative = used stock
-            stock.total_used += abs(qty)
+        # Positive = Remove from kitchen
+        if qty > 0:
+
+            stock.total_used += qty
+
+        # Negative = Add back to kitchen
         else:
-            # positive = returned/restocked
-            stock.total_used -= qty
+
+            stock.total_used -= abs(qty)
+
             if stock.total_used < 0:
                 stock.total_used = 0
 
@@ -529,7 +540,9 @@ def list_kitchen_inventory_adjustments(
 
 
 # -------------------------
-# Update kitchen adjustment (SIGN SAFE)
+# Update Kitchen Adjustment
+# Positive = Remove Stock
+# Negative = Add Stock
 # -------------------------
 @router.put(
     "/adjustments/{adjustment_id}",
@@ -544,49 +557,122 @@ def update_kitchen_adjustment(
         role_required(["admin", "store", "super_admin"])
     )
 ):
+    # -------------------------
+    # Resolve business
+    # -------------------------
     business_id = resolve_business_id(current_user, business_id)
 
+    # -------------------------
+    # Existing adjustment
+    # -------------------------
     adjustment = (
         db.query(kitchen_models.KitchenInventoryAdjustment)
         .filter(
             kitchen_models.KitchenInventoryAdjustment.id == adjustment_id,
-            kitchen_models.KitchenInventoryAdjustment.business_id == business_id
+            kitchen_models.KitchenInventoryAdjustment.business_id == business_id,
         )
         .first()
     )
 
     if not adjustment:
-        raise HTTPException(status_code=404, detail="Adjustment not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Adjustment not found"
+        )
 
+    # -------------------------
+    # Inventory
+    # -------------------------
     inventory = (
         db.query(kitchen_models.KitchenInventory)
         .filter(
             kitchen_models.KitchenInventory.kitchen_id == adjustment.kitchen_id,
             kitchen_models.KitchenInventory.item_id == adjustment.item_id,
-            kitchen_models.KitchenInventory.business_id == business_id
+            kitchen_models.KitchenInventory.business_id == business_id,
         )
         .first()
     )
 
     if not inventory:
-        raise HTTPException(status_code=404, detail="Inventory not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Kitchen inventory not found"
+        )
+
+    # -------------------------
+    # Kitchen Stock Summary
+    # -------------------------
+    stock = (
+        db.query(kitchen_models.KitchenStock)
+        .filter(
+            kitchen_models.KitchenStock.kitchen_id == adjustment.kitchen_id,
+            kitchen_models.KitchenStock.item_id == adjustment.item_id,
+            kitchen_models.KitchenStock.business_id == business_id,
+        )
+        .first()
+    )
+
+    if not stock:
+        stock = kitchen_models.KitchenStock(
+            kitchen_id=adjustment.kitchen_id,
+            item_id=adjustment.item_id,
+            total_issued=0,
+            total_used=0,
+            business_id=business_id,
+        )
+        db.add(stock)
 
     old_qty = float(adjustment.quantity_adjusted)
     new_qty = float(data.quantity_adjusted)
 
-    # 🔁 REVERT OLD
-    inventory.quantity -= old_qty
+    # =====================================================
+    # STEP 1 - Reverse old adjustment
+    # =====================================================
 
-    # 🔁 APPLY NEW
-    new_inventory = inventory
+    if old_qty > 0:
+        # Old adjustment removed stock
+        inventory.quantity += old_qty
 
-    # validate stock
-    if new_inventory.quantity + new_qty < 0:
-        raise HTTPException(status_code=400, detail="Insufficient stock")
+        stock.total_used -= old_qty
+        if stock.total_used < 0:
+            stock.total_used = 0
 
-    new_inventory.quantity += new_qty
+    else:
+        # Old adjustment added stock
+        inventory.quantity -= abs(old_qty)
 
-    # update adjustment
+        stock.total_used += abs(old_qty)
+
+    # =====================================================
+    # STEP 2 - Apply new adjustment
+    # =====================================================
+
+    if new_qty > 0:
+        # Remove stock
+
+        if inventory.quantity < new_qty:
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient stock for this adjustment"
+            )
+
+        inventory.quantity -= new_qty
+
+        stock.total_used += new_qty
+
+    else:
+        # Add stock
+
+        inventory.quantity += abs(new_qty)
+
+        stock.total_used -= abs(new_qty)
+
+        if stock.total_used < 0:
+            stock.total_used = 0
+
+    # -------------------------
+    # Update adjustment
+    # -------------------------
     adjustment.quantity_adjusted = new_qty
     adjustment.reason = data.reason
     adjustment.adjusted_by = current_user.username
@@ -595,19 +681,21 @@ def update_kitchen_adjustment(
     db.commit()
     db.refresh(adjustment)
 
+    # -------------------------
+    # Response
+    # -------------------------
     return kitchen_schemas.KitchenInventoryAdjustmentDisplay(
         id=adjustment.id,
         kitchen_id=adjustment.kitchen_id,
         item=kitchen_schemas.KitchenItemMinimalDisplay(
-            id=adjustment.item_id,
-            name=inventory.item.name if inventory.item else ""
+            id=inventory.item.id,
+            name=inventory.item.name
         ),
         quantity_adjusted=adjustment.quantity_adjusted,
         reason=adjustment.reason,
         adjusted_by=adjustment.adjusted_by,
-        adjusted_at=adjustment.adjusted_at
+        adjusted_at=adjustment.adjusted_at,
     )
-
 
 # -------------------------
 # Delete kitchen adjustment (SIGN SAFE)
