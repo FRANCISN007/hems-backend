@@ -3704,18 +3704,37 @@ def get_kitchen_stock_balance(
         # ============================================
         # 4️⃣ MERGE (same as bar)
         # ============================================
-        all_keys = set(issued_data.keys()) | set(used_data.keys()) | set(adjusted_data.keys())
+        inventories = (
+            db.query(kitchen_models.KitchenInventory)
+            .filter(
+                kitchen_models.KitchenInventory.business_id == business_id
+            )
+        )
+
+        if kitchen_id:
+            inventories = inventories.filter(
+                kitchen_models.KitchenInventory.kitchen_id == kitchen_id
+            )
+
+        if filtered_item_ids:
+            inventories = inventories.filter(
+                kitchen_models.KitchenInventory.item_id.in_(filtered_item_ids)
+            )
+
+        inventories = inventories.all()
+
         results = []
 
-        for (i_id, k_id) in all_keys:
-            if k_id is None:
-                continue
+        for inv in inventories:
+
+            i_id = inv.item_id
+            k_id = inv.kitchen_id
 
             total_issued = issued_data.get((i_id, k_id), 0)
             total_used = used_data.get((i_id, k_id), 0)
             total_adjusted = adjusted_data.get((i_id, k_id), 0)
 
-            balance = total_issued - total_used - total_adjusted
+            balance = float(inv.quantity)
 
             item = db.query(store_models.StoreItem).filter_by(
                 id=i_id,

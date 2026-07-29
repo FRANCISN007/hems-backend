@@ -748,21 +748,3 @@ def delete_kitchen_adjustment(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
