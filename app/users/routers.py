@@ -54,7 +54,15 @@ def sign_up(
     # Check duplicate username
     existing_user = user_crud.get_user_by_username(db, user.username)
     if existing_user:
-        raise HTTPException(status_code=409, detail="Username already exists")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Username '{user.username}' is already in use. "
+                "Please choose another username, add number or symbol "
+                f"'{user.username}01', '{user.username}_a', "
+                
+            ),
+        )
 
     # Determine if current user is super admin
     is_super_admin_caller = "super_admin" in (current_user.roles or "")
